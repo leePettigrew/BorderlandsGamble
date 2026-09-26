@@ -100,6 +100,38 @@ LOOT_TYPES: dict[str, LootType] = {
 }
 DEFAULT_LOOT_TYPE = "any"
 
+# Item pools are named itempool_<family>_<NN>_<tier>, e.g. itempool_sg_05_legendary. Each family: what
+# one of its items is called, and a two letter code for co-op messages.
+ITEM_FAMILIES: dict[str, tuple[str, str]] = {
+    "guns": ("gun", "gn"),
+    "ar": ("assault rifle", "ar"),
+    "ps": ("pistol", "ps"),
+    "sm": ("SMG", "sm"),
+    "sg": ("shotgun", "sg"),
+    "sr": ("sniper rifle", "sr"),
+    "hw": ("heavy weapon", "hw"),
+    "shields": ("shield", "sh"),
+    "grenade_gadgets": ("grenade", "gr"),
+    "repkit": ("repkit", "rk"),
+    "class_mods": ("class mod", "cm"),
+    "enhancements": ("enhancement", "en"),
+}
+
+
+def pool_family(pool: str) -> str | None:
+    """Gets the family an item pool belongs to, e.g. "sg" for itempool_sg_05_legendary."""
+    prefix = "itempool_"
+    if not pool.startswith(prefix):
+        return None
+    family = pool.removeprefix(prefix).rsplit("_", 2)[0]
+    return family if family in ITEM_FAMILIES else None
+
+
+def item_name(tier: Tier, family: str | None) -> str:
+    """Names one item, e.g. "legendary shotgun", or "legendary item" if what it is isn't known."""
+    noun = ITEM_FAMILIES[family][0] if family in ITEM_FAMILIES else "item"
+    return f"{tier.value} {noun}"
+
 
 def loot_type(key: str) -> LootType:
     """Gets a loot type, falling back to "Anything" for keys this version doesn't know."""

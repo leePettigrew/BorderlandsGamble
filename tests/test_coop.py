@@ -17,6 +17,7 @@ from borderlands_gamble.casino import (
     SlotController,
     Tone,
 )
+from borderlands_gamble.leaderboard import SpinRecord
 from borderlands_gamble.machines import LOOT_SLOTS, spin_cost
 from borderlands_gamble.slots import Currency, Symbol
 from borderlands_gamble.stats import Stats
@@ -216,6 +217,28 @@ class CoopTests(CoopTestCase):
         self.network.to_host.append(protocol.encode(protocol.Ping(1234)))
         self.flush()
         self.assertEqual(self.client.pongs, [protocol.Pong(1234)])
+
+    def test_records_reach_the_client(self) -> None:
+        self.start()
+        records: list[SpinRecord] = []
+        spin = SpinRecord("Host", "cash", (S.CASH,) * 3, 1, 50_000, 50_000, 1_000_000)
+        text = protocol.encode(spin)
+        self.assertTrue(
+            coop.handle_client_message(
+                self.client.controller, text, print, self.client.logs.append, on_record=records.append
+            )
+        )
+        self.assertEqual(records, [spin])
+        # With nothing listening, they're still ours, just not used
+        client = self.client
+        self.assertTrue(coop.handle_client_message(client.controller, text, print, client.logs.append))
+        self.assertEqual(self.client.logs, [])
+
+    def test_the_host_ignores_records_from_clients(self) -> None:
+        self.start()
+        cheat = SpinRecord("Friend", "cash", (S.VAULT,) * 3, 10, 1, 0, 9)
+        self.host.receive(self.friend, protocol.encode(cheat))
+        self.assertIn("Ignoring a host-bound SpinRecord", self.host.logs[-1])
 
     def test_bad_messages_are_logged_not_raised(self) -> None:
         self.start()

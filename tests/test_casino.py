@@ -307,6 +307,45 @@ class CasinoPayoutTests(CasinoTestCase):
         casino.on_spin = explode
         self.assertIsInstance(casino.pull(self.player, 3, "cash", 1), tuple)
 
+    def test_every_payout_is_reported(self) -> None:
+        settled: list[tuple[Any, Any, int, Payout]] = []
+        casino = self.make_casino([(S.LEGENDARY,) * 3, (S.SKULL,) * 3])
+        casino.on_settled = lambda player, result, charged, payout: settled.append(
+            (player, result.line, charged, payout),
+        )
+        casino.pull(self.player, 1, "cash", 1, "shotguns")
+        self.assertEqual(settled, [], "not until it pays out")
+        casino.settle("Amara", 1)
+        [(player, line, charged, payout)] = settled
+        self.assertEqual((player, line, charged), (self.player, (S.LEGENDARY,) * 3, 75_000))
+        self.assertEqual(payout.items, (Tier.LEGENDARY,))
+        self.assertEqual(payout.pools, ("itempool_sg_05_legendary",))
+
+        # Paid out by the timeout too, and on free play nothing was charged
+        casino = self.make_casino([(S.SKULL,) * 3], free_play=True)
+        casino.on_settled = lambda *args: settled.append(args)
+        casino.pull(self.player, 2, "cash", 1)
+        self.clock.now += 60
+        casino.tick()
+        self.assertEqual(settled[-1][2], 0)
+
+    def test_failed_drops_are_left_out_of_the_report(self) -> None:
+        casino = self.make_casino([(S.LEGENDARY,) * 3])
+        self.backend.fail_spawns = True
+        casino.pull(self.player, 1, "cash", 1)
+        payout = casino.settle("Amara")
+        self.assertEqual((payout.items, payout.pools), ((), ()))
+
+    def test_a_broken_score_keeper_doesnt_stop_the_payout(self) -> None:
+        casino = self.make_casino([(S.CASH,) * 3])
+
+        def explode(*_: Any) -> None:
+            raise RuntimeError("disk full")
+
+        casino.on_settled = explode
+        casino.pull(self.player, 1, "cash", 1)
+        self.assertEqual(casino.settle("Amara"), Payout(cash=20 * STAKE_50))
+
     def test_unreadable_level_prices_as_level_one(self) -> None:
         casino = self.make_casino([(S.SKULL, S.CASH, S.EPIC)])
         self.player.level = None

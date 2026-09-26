@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 
 from borderlands_gamble import protocol
+from borderlands_gamble.leaderboard import NAME_LENGTH, Drop, SpinRecord
+from borderlands_gamble.loot import ITEM_FAMILIES
 from borderlands_gamble.machines import MACHINES
 from borderlands_gamble.protocol import (
     MAX_LENGTH,
@@ -19,7 +21,7 @@ from borderlands_gamble.protocol import (
     decode,
     encode,
 )
-from borderlands_gamble.slots import Symbol, spin
+from borderlands_gamble.slots import Symbol, Tier, spin
 
 S = Symbol
 
@@ -38,6 +40,19 @@ class RoundTripTests(unittest.TestCase):
             Pong(99),
             Show(256, "cash", (S.VAULT,) * 3, 10, 26000),
             Show(2_147_483_647, "eridium", (S.SKULL, S.RARE, S.EPIC), 1, 15, "assault_rifles"),
+            SpinRecord("Zane", "cash", (S.SKULL,) * 3, 1, 50_000, 50_000),
+            SpinRecord(
+                "ZoVxBeeF",
+                "cash",
+                (S.VAULT,) * 3,
+                2,
+                100_000,
+                0,
+                5_000_000,
+                0,
+                (Drop(Tier.LEGENDARY, "sg"),) * 2 + (Drop(Tier.LEGENDARY, "class_mods"), Drop(Tier.RARE)),
+            ),
+            SpinRecord("Amara", "eridium", (S.ERIDIUM,) * 3, 10, 100, 100, 0, 1500),
         ]
         for message in messages:
             with self.subTest(message=message):
@@ -45,6 +60,34 @@ class RoundTripTests(unittest.TestCase):
                 self.assertTrue(protocol.is_ours(text))
                 self.assertLessEqual(len(text), MAX_LENGTH)
                 self.assertEqual(decode(text), message)
+
+    def test_records_fit_at_their_biggest(self) -> None:
+        # A long name, the biggest amounts, and as many different items as a pull can drop
+        families = list(ITEM_FAMILIES)
+        drops = tuple(Drop(tier, families[idx % len(families)]) for idx, tier in enumerate([Tier.EPIC] * 20))
+        big = 2_147_483_647
+        biggest = SpinRecord("x" * NAME_LENGTH, "eridium", (S.VAULT,) * 3, 10, big, big, big, big, drops)
+        text = encode(biggest)
+        self.assertLessEqual(len(text), MAX_LENGTH)
+        decoded = decode(text)
+        assert isinstance(decoded, SpinRecord)
+        # Too long to say what every item is, so it just counts them
+        self.assertEqual(decoded.drops, (Drop(Tier.EPIC),) * 20)
+        self.assertEqual((decoded.stake, decoded.cash, decoded.eridium), (big, big, big))
+
+    def test_records_say_what_dropped_when_they_can(self) -> None:
+        drops = (Drop(Tier.LEGENDARY, "sg"),) * 2 + (Drop(Tier.EPIC, "shields"), Drop(Tier.RARE))
+        text = encode(SpinRecord("Zane", "cash", (S.VAULT,) * 3, 1, 50_000, 50_000, 2_500_000, 0, drops))
+        self.assertTrue(text.endswith("|2Lsg,Esh,R"), text)
+
+    def test_bad_records_are_refused(self) -> None:
+        head = "BLGMB|1|record|Zane|cash|VVV|1|10|10|0|0|"
+        for drops in ("2Xsg", "Lzz", "21L", "L,,E", "lsg", "-1L"):
+            with self.subTest(drops=drops), self.assertRaises(ProtocolError):
+                decode(head + drops)
+        with self.assertRaises(ProtocolError):
+            decode("BLGMB|1|record|Zane|cash|VVV|0|10|10|0|0|")
+        self.assertEqual(decode("BLGMB|1|record| |cash|VVV|1|10|10|0|0|").player, "Player")
 
     def test_every_symbol_has_a_unique_code(self) -> None:
         self.assertEqual(set(protocol.SYMBOL_CODES), set(Symbol))

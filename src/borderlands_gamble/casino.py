@@ -185,6 +185,8 @@ class Payout:
     eridium: int = 0
     items: tuple[Tier, ...] = ()
     errors: tuple[str, ...] = ()
+    # The item pool each of `items` dropped from, in the same order
+    pools: tuple[str, ...] = ()
 
 
 # Either (the spin, how much was charged for it), or why the pull was refused
@@ -198,6 +200,7 @@ class _PendingPayout:
     result: SpinResult
     loot_level: int
     loot_type: str
+    charged: int
     deadline: float
 
 
@@ -211,6 +214,7 @@ class Casino:
         clock: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] = print,
         on_spin: Callable[[Any, SpinResult, str], None] | None = None,
+        on_settled: Callable[[Any, SpinResult, int, Payout], None] | None = None,
     ) -> None:
         """
         Args:
@@ -221,6 +225,8 @@ class Casino:
             log: Where to report what happens.
             on_spin: Called with (player, spin, loot type) for every pull that goes through, e.g.
                      to let the other players watch.
+            on_settled: Called with (player, spin, amount charged, payout) once each pull has paid
+                        out, e.g. for the leaderboard.
         """
         self.backend = backend
         self.rules = rules
@@ -228,6 +234,7 @@ class Casino:
         self.clock = clock
         self.log = log
         self.on_spin = on_spin
+        self.on_settled = on_settled
         self._pending: dict[str, _PendingPayout] = {}
 
     @property
@@ -296,6 +303,7 @@ class Casino:
             result=result,
             loot_level=rules.loot_level if rules.loot_level > 0 else level,
             loot_type=loot_type,
+            charged=charged,
             deadline=self.clock() + SETTLE_TIMEOUT,
         )
         # Don't log the line yet, the console shouldn't spoil the spin
@@ -324,7 +332,13 @@ class Casino:
         if pending is None or (request_id is not None and pending.request_id != request_id):
             return None
         del self._pending[player_key]
-        return self._pay_out(pending)
+        payout = self._pay_out(pending)
+        if self.on_settled is not None:
+            try:
+                self.on_settled(pending.player, pending.result, pending.charged, payout)
+            except Exception as ex:  # noqa: BLE001 - keeping score mustn't break the payout
+                self.log(f"Couldn't record the pull: {ex!r}")
+        return payout
 
     def tick(self) -> bool:
         """
@@ -392,19 +406,25 @@ class Casino:
             if error:
                 errors.append(error)
 
-        dropped: list[Tier] = []
+        dropped: list[tuple[Tier, str]] = []
         drops = loot.roll_drops(result.loot, self.rng, pending.loot_type)
         for idx, (tier, pool) in enumerate(drops):
             try:
                 self.backend.spawn_item(pending.player, pool, pending.loot_level, idx, len(drops))
-                dropped.append(tier)
+                dropped.append((tier, pool))
             except Exception as ex:  # noqa: BLE001
                 self.log(f"Dropping {pool} failed: {ex!r}")
                 errors.append(f"couldn't drop a {tier.value} item")
 
         if errors:
             self.log(f"Payout problems for {self.backend.player_name(pending.player)}: {', '.join(errors)}")
-        return Payout(paid[Currency.CASH], paid[Currency.ERIDIUM], tuple(dropped), tuple(errors))
+        return Payout(
+            paid[Currency.CASH],
+            paid[Currency.ERIDIUM],
+            tuple(tier for tier, _ in dropped),
+            tuple(errors),
+            tuple(pool for _, pool in dropped),
+        )
 
 
 # ==================================================================================================

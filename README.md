@@ -8,11 +8,10 @@ above it. Aim at it and press **E**, and the slot machine menu opens: pick a mac
 and a bet, check the paytable, and pull the lever. Wins pay out in cash or eridium, or in real loot
 that the machine drops on the floor in front of it, straight from the game's own item pools.
 
-> **Status: early.** In the first real tests, the slot machine stood in the Launchpad, E opened the
-> menu, and Free Play spins worked. Paid pulls, loot prizes, and a co-op partner's pulls failed.
-> 0.4.3 should fix all three, but hasn't been tried in game yet. The slot machine engine is fully
-> unit tested, and full solo and co-op sessions run against a simulated game. If anything is off,
-> run `gamble_diag` (see [Troubleshooting](#troubleshooting)).
+> **Status: early, and played in the real game, solo and in co-op, as of 0.4.3.** The leaderboard is
+> new in 0.5.0 and hasn't been tried in game yet. The slot machine engine is fully unit tested, and
+> full solo and co-op sessions run against a simulated game. If anything is off, run `gamble_diag`
+> (see [Troubleshooting](#troubleshooting)).
 
 Wondering how much of this is possible, and what's hard? See [docs/feasibility.md](docs/feasibility.md).
 
@@ -34,6 +33,10 @@ Wondering how much of this is possible, and what's hard? See [docs/feasibility.m
 - **Bets and luck.** Choose a 1x/2x/5x/10x bet and a luck preset from *Stingy* to *Moxxi Likes You*.
 - **Transparent odds.** Exact odds, not simulations: `gamble_odds` prints the full paytable.
 - **Lifetime stats.** Tracks spins, net winnings, jackpots, and items won.
+- **Leaderboard.** Everyone's pulls won and lost, net winnings, and items, with the latest pulls and
+  what they dropped (e.g. "legendary shotgun"). In co-op it covers every player, since the host
+  shares each pull once it's paid out. Open it from the menu, or print it all with
+  `gamble_leaderboard`.
 - **Co-op.** When both players have the mod, you each gamble separately, with your own menu, bets, and
   wallet, and the host's game handles the money and loot for everyone. You see your partner's reels
   spinning above their head, then what they won. See [docs/coop.md](docs/coop.md).
@@ -106,6 +109,7 @@ In the menu:
 | **BET** | Up / Down | D-pad up / down | Change the bet. |
 | **PLAY ... SLOTS** | | Y | Switch machine. |
 | **LEAVE** | Esc, or E if E opened it | B | Close the menu. A spin still going carries on on your HUD. |
+| **LEADERBOARD** / **PAYTABLE** | | Left stick click | Switch the right hand side between the paytable and the leaderboard. |
 
 The game still sees keys pressed in the menu, so the menu only uses ones that don't do anything
 harmful in game (no fire, grenade, action skill, or reload/use buttons). E only closes the menu if you
@@ -120,6 +124,7 @@ Console commands:
 | `gamble_machine [list\|add\|remove\|reset\|refresh]` | Manage the slot machines on this map: `add` puts one in front of you, `remove` takes away the nearest (an automatic one moves to its next spot), `reset` undoes your changes, `refresh` rebuilds them. |
 | `gamble_odds [--machine cash\|eridium] [--luck NAME] [--level N]` | Print the paytable and exact odds. |
 | `gamble_stats [--reset]` | Print or reset your lifetime stats. |
+| `gamble_leaderboard [--reset]` | Print the leaderboard: everyone's totals, recent drops, and the last 100 pulls. `--reset` clears it. |
 | `gamble_diag [--wallet]` | Check every game API the mod uses. `--wallet` also test-charges $1 and refunds it. |
 | `gamble_coop_test` | As a co-op client, check the host's mod can hear you. |
 | `gamble_trace [--seconds N]` | Research: records every game function call for a few seconds (see [docs/game-api.md](docs/game-api.md#research-the-games-own-use-prompt)). |
@@ -131,6 +136,8 @@ Options (in the mods menu):
   to show your co-op partners' spins above their heads.
 - **House Rules:** luck, price multiplier, whether you have to be at a machine, free play, and loot
   level. In co-op, the host's house rules apply to everyone.
+- **Reset Stats** and **Reset Leaderboard** clear your own lifetime stats, or your copy of the
+  leaderboard.
 
 ## Troubleshooting
 
@@ -161,6 +168,7 @@ src/borderlands_gamble/   the mod (this folder is what goes in the .sdkmod)
   protocol.py   co-op messages
   coop.py       how host and client handle co-op messages
   stats.py      lifetime stats
+  leaderboard.py everyone's results and drops, kept by each player's game
   cabinets.py   where slot machines stand, and which one you're aiming at
   menu_model.py what the menu shows, and what its buttons and keys do
   spectate.py   watching co-op partners' spins

@@ -48,6 +48,7 @@ MODS_BASE_DIR=../mods_base python3.14 -m unittest
 |---|---|---|
 | `slots.py`, `machines.py`, `loot.py` | Symbols, reels, paytables, prices, prize item pools | No |
 | `animation.py`, `stats.py`, `report.py` | Reel animation, lifetime stats, odds tables | No |
+| `leaderboard.py` | Everyone's pulls, results and drops, saved in each player's settings | No |
 | `casino.py` | `Casino` (the bank) and `SlotController` (a player's machine) | No |
 | `protocol.py`, `coop.py` | Co-op messages and how each side handles them | No |
 | `cabinets.py` | Where slot machines stand in the world, and which one you're aiming at | No |

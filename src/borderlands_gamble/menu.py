@@ -21,7 +21,7 @@ from unrealsdk.unreal import UObject, WeakPointer
 
 from . import bl4
 from .casino import OverlayView, Tone
-from .menu_model import ACT_ON_RELEASE, MENU_KEYS, KeyWatcher, MenuAction
+from .menu_model import ACT_ON_RELEASE, MENU_KEYS, PANEL_ROWS, KeyWatcher, MenuAction
 from .overlay import (
     GOLD,
     PANEL_BG,
@@ -61,7 +61,7 @@ ODDS_X = 255.0
 PAYS_X = 620.0
 PAYTABLE_TOP = -262.0
 PAYTABLE_ROW_H = 35.0
-PAYTABLE_ROWS = 14
+PAYTABLE_ROWS = PANEL_ROWS
 
 # (action, x, y, w, h, label scale), with x/y the top left corner. PULL comes first, it gets focus.
 BUTTONS: tuple[tuple[MenuAction, float, float, float, float, float], ...] = (
@@ -70,6 +70,8 @@ BUTTONS: tuple[tuple[MenuAction, float, float, float, float, float], ...] = (
     (MenuAction.LOOT_NEXT, -330.0, 162.0, 280.0, 54.0, 0.7),
     (MenuAction.BET_UP, -620.0, 226.0, 280.0, 54.0, 0.7),
     (MenuAction.LEAVE, -330.0, 226.0, 280.0, 54.0, 0.7),
+    # Top right of the right hand panel: switches it between the paytable and the leaderboard
+    (MenuAction.BOARD, 420.0, -330.0, 200.0, 46.0, 0.6),
 )
 # Actions that can't change while a pull is in flight
 LOCKED_WHILE_BUSY = frozenset({MenuAction.MACHINE, MenuAction.LOOT_NEXT, MenuAction.BET_UP})
@@ -275,6 +277,7 @@ class SlotMenu:
             MenuAction.LOOT_NEXT: info.drops_label,
             MenuAction.BET_UP: info.bet_label,
             MenuAction.LEAVE: "LEAVE",
+            MenuAction.BOARD: info.board_label,
         }
         for button in widgets.buttons:
             button.enabled = not (info.busy and button.action in LOCKED_WHILE_BUSY)

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
-from .slots import Currency, Machine, Pattern, Prize, Reel, Symbol, Tier
+from .slots import Currency, Machine, Pattern, Prize, Reel, SpinResult, Symbol, Tier, scale_prize
+
+if TYPE_CHECKING:
+    from .slots import Line
 
 S = Symbol
 
@@ -121,6 +125,29 @@ def base_cost(machine: Machine, level: int) -> int:
     if machine.currency is Currency.CASH:
         return CASH_COST_PER_LEVEL * max(1, level)
     return nice_round(ERIDIUM_BASE_COST)
+
+
+def replay(machine_key: str, line: Line, bet: int, stake: int) -> SpinResult:
+    """
+    Rebuilds a spin from its line of symbols, e.g. one that another player's game rolled.
+
+    Luck only changes how often symbols come up, not what they pay, so the base machine's paytable
+    gives the same prize the roll did.
+    """
+    machine = MACHINES[machine_key]
+    prize = machine.evaluate(line)
+    payout, eridium, loot = scale_prize(prize, stake, bet)
+    return SpinResult(
+        machine_key=machine_key,
+        currency=machine.currency,
+        line=line,
+        prize=prize,
+        bet=bet,
+        stake=stake,
+        payout=payout,
+        eridium=eridium,
+        loot=loot,
+    )
 
 
 def spin_cost(machine: Machine, level: int, *, bet: int = 1, cost_multiplier: float = 1.0) -> int:

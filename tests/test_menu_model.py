@@ -1,10 +1,15 @@
 import unittest
 from typing import Any
 
+from borderlands_gamble.leaderboard import Drop, Leaderboard, SpinRecord
 from borderlands_gamble.machines import BET_MULTIPLIERS
 from borderlands_gamble.menu_model import (
     ACT_ON_RELEASE,
+    GOLD,
+    GREY,
     MENU_KEYS,
+    PANEL_ROWS,
+    TIER_COLORS,
     WHITE,
     ActionGate,
     KeyWatcher,
@@ -15,8 +20,13 @@ from borderlands_gamble.menu_model import (
     next_loot_type,
     next_machine,
 )
-from borderlands_gamble.slots import SYMBOL_COLORS, Currency, Symbol
+from borderlands_gamble.menu_model import (
+    leaderboard_rows as board_rows,
+)
+from borderlands_gamble.slots import SYMBOL_COLORS, Currency, Symbol, Tier
 from borderlands_gamble.stats import Stats
+
+S = Symbol
 
 
 class KeyWatcherTests(unittest.TestCase):
@@ -175,3 +185,87 @@ class MenuInfoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeaderboardPageTests(unittest.TestCase):
+    def info(self, board: Leaderboard | None, show: bool) -> Any:
+        return build_menu_info(
+            "cash",
+            bet=1,
+            price=50_000,
+            free_play=False,
+            luck_name="Fair",
+            is_host=True,
+            wallet={},
+            stats=Stats(),
+            busy=False,
+            spinning=False,
+            pull_key=None,
+            leaderboard=board,
+            show_leaderboard=show,
+        )
+
+    def test_button_switches_pages(self) -> None:
+        board = Leaderboard()
+        self.assertEqual(MENU_KEYS["Gamepad_LeftThumbstick"], MenuAction.BOARD)
+        paytable = self.info(board, show=False)
+        self.assertEqual(
+            (paytable.board_label, paytable.paytable_title), ("LEADERBOARD", "PAYTABLE  (x1 bet)")
+        )
+        page = self.info(board, show=True)
+        self.assertEqual((page.board_label, page.paytable_title), ("PAYTABLE", "LEADERBOARD"))
+        self.assertEqual([row.pattern for row in page.paytable], ["No pulls yet. Pull the lever!"])
+        # Without a leaderboard there's only the paytable
+        self.assertEqual(self.info(None, show=True).paytable_title, "PAYTABLE  (x1 bet)")
+
+    def test_rows(self) -> None:
+        board = Leaderboard()
+        jackpot = (Drop(Tier.LEGENDARY, "sg"), Drop(Tier.LEGENDARY, "ar"))
+        board.record(SpinRecord("Zane", "cash", (S.VAULT,) * 3, 1, 50_000, 50_000, 2_500_000, 0, jackpot))
+        board.record(SpinRecord("Moze", "cash", (S.SKULL,) * 3, 1, 50_000, 50_000))
+        board.record(SpinRecord("Moze", "eridium", (S.ERIDIUM,) * 3, 1, 10, 10, 0, 150))
+
+        rows = [(row.pattern, row.odds, row.pays) for row in self.info(board, show=True).paytable]
+        self.assertEqual(
+            rows,
+            [
+                ("1. Zane", "1 won, 0 lost", "+$2.45M"),
+                ("      2 legendary", "", ""),
+                ("2. Moze", "1 won, 1 lost", "-$50k"),
+                ("      no items yet", "", "+140 eridium"),
+                ("", "", ""),
+                ("RECENT PULLS", "", ""),
+                ("Moze", "Eridium haul!", "+140 eridium"),
+                ("Moze", "no luck", "-$50k"),
+                ("Zane", "legendary shotgun +1", "+$2.45M"),
+            ],
+        )
+        colors = [row.color for row in self.info(board, show=True).paytable]
+        self.assertEqual(colors[0], GOLD)
+        self.assertEqual(colors[1], TIER_COLORS[Tier.LEGENDARY])
+        self.assertEqual(colors[7], GREY)
+        self.assertEqual(colors[8], TIER_COLORS[Tier.LEGENDARY])
+
+    def test_fits_the_panel(self) -> None:
+        board = Leaderboard()
+        for idx in range(40):
+            board.record(SpinRecord(f"Player {idx % 6}", "cash", (S.SKULL,) * 3, 1, 1000 + idx, 1000))
+        rows = self.info(board, show=True).paytable
+        self.assertEqual(len(rows), PANEL_ROWS)
+        self.assertEqual(sum(1 for row in rows if row.pattern.startswith(("1.", "2.", "3.", "4.", "5."))), 4)
+
+
+class OutcomeTests(unittest.TestCase):
+    def test_shortens_to_fit(self) -> None:
+        def outcome(*drops: Drop) -> str:
+            board = Leaderboard()
+            board.record(SpinRecord("Zane", "cash", (S.VAULT,) * 3, 10, 1, 1, 50, 0, drops))
+            return board_rows(board)[-1].odds
+
+        sniper = Drop(Tier.LEGENDARY, "sr")
+        self.assertEqual(outcome(sniper), "legendary sniper rifle")
+        self.assertEqual(len(outcome(Drop(Tier.LEGENDARY, "ar"))), 23)
+        self.assertEqual(outcome(Drop(Tier.EPIC, "sg"), Drop(Tier.EPIC, "sg")), "2 epic shotguns")
+        grenade = Drop(Tier.RARE, "grenade_gadgets")
+        self.assertEqual(outcome(Drop(Tier.RARE, "sg"), grenade), "rare shotgun +1")
+        self.assertEqual(outcome(sniper, sniper, Drop(Tier.EPIC, "hw")), "2 legendary, 1 epic")

@@ -11,19 +11,45 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from .leaderboard import compact_amount, items_summary
 from .loot import DEFAULT_LOOT_TYPE, LOOT_TYPES, loot_type
 from .machines import BET_MULTIPLIERS, LUCK_PRESETS, MACHINES
-from .slots import SYMBOL_COLORS, Currency, describe_loot, exact_odds, format_amount, scale_prize
+from .slots import (
+    SYMBOL_COLORS,
+    Currency,
+    Symbol,
+    Tier,
+    describe_loot,
+    exact_odds,
+    format_amount,
+    scale_prize,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
+    from .leaderboard import Leaderboard, SpinRecord
     from .slots import Machine, Odds, Prize
     from .stats import Stats
 
 RGBA = tuple[float, float, float, float]
 
 WHITE: RGBA = (0.92, 0.92, 0.92, 1.0)
+GREY: RGBA = (0.62, 0.62, 0.62, 1.0)
+GOLD: RGBA = SYMBOL_COLORS[Symbol.VAULT]
+TIER_COLORS: dict[Tier, RGBA] = {
+    Tier.RARE: SYMBOL_COLORS[Symbol.RARE],
+    Tier.EPIC: SYMBOL_COLORS[Symbol.EPIC],
+    Tier.LEGENDARY: SYMBOL_COLORS[Symbol.LEGENDARY],
+}
+
+# How many rows the right hand panel has, for the paytable or the leaderboard
+PANEL_ROWS = 14
+# Players shown on the menu's leaderboard. Co-op has at most four; the console lists everyone
+BOARD_PLAYERS = 4
+# Longest description of what a pull won that fits its column, next to an amount like "+140 eridium".
+# Every single item's name fits, e.g. "legendary assault rifle"
+OUTCOME_LENGTH = 24
 
 
 class MenuAction(Enum):
@@ -34,6 +60,7 @@ class MenuAction(Enum):
     BET_UP = "bet_up"
     BET_DOWN = "bet_down"
     LEAVE = "leave"
+    BOARD = "board"
 
 
 # Keys the menu watches while it's open, by their Unreal names. The SDK doesn't run keybinds while
@@ -51,6 +78,8 @@ MENU_KEYS: dict[str, MenuAction] = {
     "Gamepad_DPad_Up": MenuAction.BET_UP,
     "Gamepad_DPad_Down": MenuAction.BET_DOWN,
     "Gamepad_FaceButton_Top": MenuAction.MACHINE,
+    # Sprint, which does nothing while the menu stops you moving
+    "Gamepad_LeftThumbstick": MenuAction.BOARD,
     "Escape": MenuAction.LEAVE,
     "Gamepad_FaceButton_Right": MenuAction.LEAVE,
 }
@@ -173,6 +202,8 @@ class MenuInfo:
     bet_label: str
     machine_label: str
     drops_label: str
+    # The button that switches the right hand panel between the paytable and the leaderboard
+    board_label: str
     wallet: str
     paytable_title: str
     paytable: tuple[PaytableRow, ...]
@@ -238,6 +269,59 @@ def _lifetime(stats: Stats) -> str:
     return "   |   ".join(parts)
 
 
+def _board_color(spin: SpinRecord) -> RGBA:
+    if spin.drops:
+        return TIER_COLORS[max(spin.drops, key=lambda drop: list(Tier).index(drop.tier)).tier]
+    return SYMBOL_COLORS[Symbol.CASH] if spin.net > 0 else GREY
+
+
+def _shorten(text: str, length: int) -> str:
+    return text if len(text) <= length else text[: length - 3].rstrip() + "..."
+
+
+def _outcome(spin: SpinRecord, length: int) -> str:
+    """What a pull won, in at most `length` characters: every item if they fit, else fewer words."""
+    text = spin.outcome()
+    if len(text) <= length or len(spin.drops) < 2:
+        return _shorten(text, length)
+    first_and_more = f"{spin.drops[0].name} +{len(spin.drops) - 1}"
+    if len(first_and_more) <= length:
+        return first_and_more
+    tiers = {tier: sum(1 for drop in spin.drops if drop.tier is tier) for tier in reversed(Tier)}
+    return _shorten(describe_loot(tiers.items()), length)
+
+
+def leaderboard_rows(board: Leaderboard, rows: int = PANEL_ROWS) -> tuple[PaytableRow, ...]:
+    """
+    Lays out the leaderboard in the paytable's rows (name, detail, amount).
+
+    Each player gets a row with their pulls won and lost and their net cash, and one under it with the
+    items they've won. The rest of the rows list the most recent pulls: who, what they won, and what
+    they came out with.
+    """
+    if not board.standings:
+        return (PaytableRow("No pulls yet. Pull the lever!", GREY, "", ""),)
+
+    lines: list[PaytableRow] = []
+    for rank, standing in enumerate(board.ranked()[:BOARD_PLAYERS], 1):
+        stats = standing.stats
+        record = f"{stats.wins:,} won, {standing.losses:,} lost"
+        cash = compact_amount(Currency.CASH, stats.cash_net, signed=True)
+        lines.append(PaytableRow(f"{rank}. {standing.player}", GOLD if rank == 1 else WHITE, record, cash))
+        best = next((tier for tier in reversed(Tier) if stats.items.get(tier.value)), None)
+        eridium = compact_amount(Currency.ERIDIUM, stats.eridium_net, signed=True)
+        items = items_summary(stats) or "no items yet"
+        color = TIER_COLORS[best] if best else GREY
+        lines.append(PaytableRow(f"      {items}", color, "", eridium if stats.eridium_net else ""))
+
+    lines += [PaytableRow("", WHITE, "", ""), PaytableRow("RECENT PULLS", GREY, "", "")]
+    for spin in board.recent()[: max(0, rows - len(lines))]:
+        outcome = _outcome(spin, OUTCOME_LENGTH)
+        net = compact_amount(spin.currency, spin.net, signed=True)
+        lines.append(PaytableRow(spin.player, _board_color(spin), outcome, net))
+    return tuple(lines[:rows])
+
+
 def build_menu_info(
     machine_key: str,
     *,
@@ -252,6 +336,8 @@ def build_menu_info(
     busy: bool,
     spinning: bool,
     pull_key: str | None,
+    leaderboard: Leaderboard | None = None,
+    show_leaderboard: bool = False,
 ) -> MenuInfo:
     """
     Works out what the menu shows.
@@ -270,6 +356,8 @@ def build_menu_info(
         busy: True while a pull is in flight.
         spinning: True while the reels are spinning, when pulling again skips to the result.
         pull_key: The name of a key that pulls the lever, for the hints.
+        leaderboard: Everyone's results, to show instead of the paytable if `show_leaderboard`.
+        show_leaderboard: True to show the leaderboard rather than the paytable.
     Returns:
         The menu's contents.
     """
@@ -311,14 +399,24 @@ def build_menu_info(
     hints = ["Space: pull" if pull_key is None else f"Space or {pull_key}: pull"]
     hints += ["Left/Right: drops", "Up/Down: bet", "Esc: leave"]
 
+    title = f"PAYTABLE  (x{bet} bet)"
+    if show_leaderboard and leaderboard is not None:
+        title = "LEADERBOARD"
+        rows = list(leaderboard_rows(leaderboard))
+        players = len(leaderboard.standings)
+        who = f"{players} player{'s' if players != 1 else ''}"
+        summary = f"{leaderboard.pulls:,} pulls by {who}, including co-op partners."
+        note = "Kept in your game. 'gamble_leaderboard' in the console lists more."
+
     return MenuInfo(
         tagline=MACHINE_TAGLINES.get(machine_key, ""),
         pull_label=pull_label,
         bet_label=f"BET  x{bet}",
         machine_label=f"PLAY {other.name.upper()}",
         drops_label=f"DROPS: {drops_label(loot_type_key)}",
+        board_label="PAYTABLE" if show_leaderboard and leaderboard is not None else "LEADERBOARD",
         wallet=_wallet(wallet),
-        paytable_title=f"PAYTABLE  (x{bet} bet)",
+        paytable_title=title,
         paytable=tuple(rows),
         summary=summary,
         note=note,

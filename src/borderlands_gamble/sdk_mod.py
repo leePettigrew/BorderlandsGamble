@@ -29,6 +29,7 @@ from unrealsdk.hooks import Block, Type, log_all_calls
 from . import bl4, coop, protocol, world
 from .cabinets import MachineOverrides
 from .casino import Casino, DisplaySwitch, HouseRules, LocalLink, PlayerSettings, RemoteLink, SlotController
+from .leaderboard import Leaderboard, SpinRecord
 from .loot import DEFAULT_LOOT_TYPE, LOOT_TYPES
 from .machines import BET_MULTIPLIERS, DEFAULT_LUCK, LUCK_PRESETS, MACHINES, nice_round, spin_cost
 from .menu import IDLE_STATUS, SlotMenu
@@ -297,6 +298,7 @@ loot_level_option = SliderOption(
 
 stats_option: HiddenOption[Any] = HiddenOption("stats", {})
 placed_machines_option: HiddenOption[Any] = HiddenOption("placed_machines", {})
+leaderboard_option: HiddenOption[Any] = HiddenOption("leaderboard", {})
 
 
 def _print_odds(_: ButtonOption) -> None:
@@ -305,6 +307,10 @@ def _print_odds(_: ButtonOption) -> None:
 
 def _reset_stats(_: ButtonOption) -> None:
     run_stats_command(argparse.Namespace(reset=True))
+
+
+def _reset_leaderboard(_: ButtonOption) -> None:
+    leaderboard_command(argparse.Namespace(reset=True))
 
 
 def player_settings() -> PlayerSettings:
@@ -348,6 +354,9 @@ spectator: Spectator | None = None
 spectators: UmgSpectators | None = None
 overrides: MachineOverrides = MachineOverrides()
 stats: Stats = Stats()
+leaderboard: Leaderboard = Leaderboard()
+# Whether the menu shows the leaderboard instead of the paytable
+_show_leaderboard = False
 gate: ActionGate | None = None
 
 _last_tick = 0.0
@@ -393,6 +402,11 @@ class SmartLink:
 def save_stats(new_stats: Stats) -> None:
     stats_option.value = new_stats.to_json()
     stats_option.save()
+
+
+def save_leaderboard() -> None:
+    leaderboard_option.value = leaderboard.to_json()
+    leaderboard_option.save()
 
 
 def save_overrides() -> None:
@@ -541,6 +555,8 @@ def _menu_info() -> MenuInfo:
         busy=controller.is_waiting or controller.is_spinning,
         spinning=controller.is_spinning,
         pull_key=open_menu_keybind.key,
+        leaderboard=leaderboard,
+        show_leaderboard=_show_leaderboard,
     )
 
 
@@ -608,6 +624,7 @@ def close_menu() -> None:
 
 def on_menu_action(action: MenuAction) -> None:
     """Handles a button clicked or key pressed in the menu."""
+    global _show_leaderboard
     if controller is None or menu is None or gate is None or not gate.allow(action):
         return
     busy = controller.is_waiting or controller.is_spinning
@@ -617,6 +634,8 @@ def on_menu_action(action: MenuAction) -> None:
             pull_lever()
         case MenuAction.LEAVE:
             close_menu()
+        case MenuAction.BOARD:
+            _show_leaderboard = not _show_leaderboard
         case MenuAction.MACHINE if not busy:
             new_machine = next_machine(settings.machine_key)
             machine_option.value = MACHINE_LABELS[new_machine]
@@ -720,6 +739,24 @@ def _on_spin(player: UObject, result: SpinResult, loot_type_key: str) -> None:
         _watch(spinner, result, loot_type_key)
 
 
+def _on_settled(player: UObject, result: SpinResult, charged: int, payout: Payout) -> None:
+    """The host's casino paid out a pull, anyone's: put it on the leaderboard, and tell everyone else."""
+    if backend is None:
+        return
+    record = SpinRecord.of_payout(backend.player_name(player), result, charged, payout)
+    _record(record)
+    if channel is not None:
+        message = protocol.encode(record)
+        for pc in bl4.other_controllers():
+            channel.send_to_client(pc, message)
+
+
+def _record(record: SpinRecord) -> None:
+    leaderboard.record(record)
+    save_leaderboard()
+    _refresh_menu_info()
+
+
 def _on_show(show: protocol.Show) -> None:
     """The host says another player pulled."""
     local = bl4.local_player()
@@ -778,7 +815,7 @@ def on_client_message(text: str) -> None:
     """The host sent us (a client) a message."""
     if controller is None:
         return
-    coop.handle_client_message(controller, text, _on_pong, log, _on_show)
+    coop.handle_client_message(controller, text, _on_pong, log, _on_show, _record)
     _ensure_ticking()
 
 
@@ -973,6 +1010,25 @@ def run_stats_command(args: argparse.Namespace) -> None:
 run_stats_command.add_argument("--reset", action="store_true", help="Forget all stats.")
 
 
+@command(
+    "gamble_leaderboard",
+    description="Prints the leaderboard: everyone's wins, losses, and drops, and the recent pulls.",
+)
+def leaderboard_command(args: argparse.Namespace) -> None:
+    global leaderboard
+    if args.reset:
+        leaderboard = Leaderboard()
+        save_leaderboard()
+        _refresh_menu_info()
+        log("Leaderboard reset.")
+        return
+    for line in leaderboard.summary_lines():
+        log(line)
+
+
+leaderboard_command.add_argument("--reset", action="store_true", help="Clear the leaderboard.")
+
+
 @command("gamble_diag", description="Checks every game API the mod relies on.")
 def diag_command(args: argparse.Namespace) -> None:
     diag_backend = backend or bl4.BL4Backend()
@@ -1077,9 +1133,10 @@ def _summarize_trace() -> Iterator[None]:
 
 def on_enable() -> None:
     global backend, overlay, prompt, menu, display, casino, channel, controller, slot_machines
-    global spectator, spectators, overrides, stats, gate
+    global spectator, spectators, overrides, stats, gate, leaderboard
     # Settings, including saved stats, are always loaded before the mod first gets enabled
     stats = Stats.from_json(stats_option.value)
+    leaderboard = Leaderboard.from_json(leaderboard_option.value)
     overrides = MachineOverrides.from_json(placed_machines_option.value)
     slot_machines = world.SlotMachines(lambda: overrides, lambda: bool(signs_option.value))
     backend = bl4.BL4Backend(slot_machines.bodies)
@@ -1087,7 +1144,7 @@ def on_enable() -> None:
     prompt = UmgPrompt()
     menu = SlotMenu(on_menu_action, lambda: float(menu_scale_option.value))
     display = DisplaySwitch({"hud": overlay, "menu": menu}, "hud")
-    casino = Casino(backend, house_rules, log=log, on_spin=_on_spin)
+    casino = Casino(backend, house_rules, log=log, on_spin=_on_spin, on_settled=_on_settled)
     spectator = Spectator(clock=lambda: time.monotonic())
     spectators = UmgSpectators()
     channel = bl4.CoopChannel(on_host_message, on_client_message)
@@ -1175,7 +1232,13 @@ mod: Mod = build_mod(
             on_press=_reset_stats,
             description="Forgets your lifetime winnings and losses.",
         ),
+        ButtonOption(
+            "Reset Leaderboard",
+            on_press=_reset_leaderboard,
+            description="Clears the leaderboard in your game. Co-op partners keep their own.",
+        ),
         stats_option,
+        leaderboard_option,
         placed_machines_option,
     ],
     keybinds=[open_menu_keybind, use_machine_keybind, quick_pull_keybind],
@@ -1187,6 +1250,7 @@ mod: Mod = build_mod(
         machine_command,
         run_odds_command,
         run_stats_command,
+        leaderboard_command,
         diag_command,
         coop_test_command,
         trace_command,

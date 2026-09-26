@@ -24,7 +24,7 @@ loot on the floor in front of their slot machine.
                                                           in front of their machine
 ```
 
-- **Messages** are short strings like `BLGMB|1|pull|1|cash.shotguns|1|0.4.3`
+- **Messages** are short strings like `BLGMB|1|pull|1|cash.shotguns|1|0.5.0`
   ([`protocol.py`](../src/borderlands_gamble/protocol.py)). They ride on two network calls that
   every Unreal Engine player controller has: `ServerExecRPC` (client → host; its normal job is
   dev-build console commands) and `ClientMessage` (host → client). The mod catches its own messages
@@ -36,6 +36,10 @@ loot on the floor in front of their slot machine.
   with the line of symbols. Their games spin a small copy of the reels above that player's head, then
   show what they won for a few seconds. If that player is off screen or far away, it shows in the top
   left corner instead. Turn it off with **Show Others' Spins**.
+- **Everyone keeps the same leaderboard.** Once a pull pays out, the host sends everyone a `record`
+  message: who pulled, what it cost, what it actually paid, and what dropped (the rarity and kind of
+  each item, e.g. a legendary shotgun). Each game adds it to its own leaderboard, saved with its
+  settings, so yours covers every session you were in, whoever hosted.
 - **The host's house rules apply to everyone**: luck, price multiplier, "only at machines", free
   play, and loot level. Each player picks their own machine, bet, animation speed, and menu size. A
   client's menu learns the host's price from its first pull.
@@ -57,10 +61,10 @@ loot on the floor in front of their slot machine.
 
 ## Testing it together
 
-1. Both install the same build. The version shows next to the mod in the `mods` menu (**0.4.3**).
+1. Both install the same build. The version shows next to the mod in the `mods` menu (**0.5.0**).
 2. Host starts the game; friend joins.
 3. **Friend** runs `gamble_coop_test` in the console. Expected:
-   `Co-op test: the host answered in 45 ms, running v0.4.3` then `all good, pull away!`
+   `Co-op test: the host answered in 45 ms, running v0.5.0` then `all good, pull away!`
 4. Host walks up to the slot machine in a safehouse, presses E, and pulls. This checks the host
    path. The friend should see the host's reels spinning above the host's head.
 5. Friend does the same, at the same slot machine. Check, in order:
@@ -85,8 +89,9 @@ If step 3 says **no answer from the host**:
 ## What's verified and what isn't
 
 The co-op logic runs in the automated tests: a simulated host and client pass real protocol messages
-back and forth, and the full mod plays co-op sessions in a fake game. Nobody has run it in two real
-copies of BL4 with this version yet. The first real co-op test, on 0.4.0, found pulls never reached
-the host, because they went through `ServerExec`. 0.4.3 uses `ServerExecRPC`, the actual network
-call, but whether it and `ClientMessage` get through in BL4's networking still needs checking. That's
-exactly what `gamble_coop_test` does.
+back and forth, and the full mod plays co-op sessions in a fake game.
+
+In two real copies of BL4, the first co-op test, on 0.4.0, found pulls never reached the host,
+because they went through `ServerExec`. With `ServerExecRPC` in 0.4.3, co-op pulls work. The
+leaderboard's `record` messages are new in 0.5.0, and haven't been tried in a real co-op game yet.
+They travel the same way as the results, over `ClientMessage`.

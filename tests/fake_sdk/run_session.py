@@ -194,6 +194,21 @@ def play_in_the_world(
     assert "PULL THE LEVER  ($126,000)" in statuses()
     press("Left")
     assert sdk_mod.player_settings().loot_type == "any"
+
+    # The leaderboard button swaps the paytable for everyone's results, Moze's and Zane's
+    board_button = buttons[MenuAction.BOARD]
+    assert board_button.label.text == "LEADERBOARD"
+    click(MenuAction.BOARD)
+    widgets = menu._widgets
+    assert widgets.paytable_title.text == "LEADERBOARD", widgets.paytable_title.text
+    assert board_button.label.text == "PAYTABLE"
+    names = [pattern.text for pattern, _, _ in widgets.rows]
+    assert "RECENT PULLS" in names and "Zane" in names, names
+    ranked = [name for name in names if name[:1].isdigit()]
+    assert sorted(name.split(". ")[1] for name in ranked) == ["Moze", "Zane"], names
+    # L3 on a controller does the same
+    press("Gamepad_LeftThumbstick")
+    assert widgets.paytable_title.text.startswith("PAYTABLE"), widgets.paytable_title.text
     saved = json.loads(settings_file.read_text())
     assert saved["options"]["Your Machine"]["loot_type"] == "Anything", saved
 
@@ -396,7 +411,7 @@ def main(mods_base_dir: Path) -> None:
     mod = gamble.mod
 
     assert mod.name == "Borderlands Gamble", mod.name
-    assert mod.version == "0.4.3", mod.version
+    assert mod.version == "0.5.0", mod.version
     assert not mod.enabling_locked, "mod should be allowed to enable in BL4"
     assert ".sdkmod" in str(sdk_mod.__file__), f"should import from the .sdkmod, not {sdk_mod.__file__}"
 
@@ -404,8 +419,9 @@ def main(mods_base_dir: Path) -> None:
 
     from borderlands_gamble import protocol
     from borderlands_gamble.bl4 import TakeMethod
+    from borderlands_gamble.leaderboard import Drop, SpinRecord
     from borderlands_gamble.menu_model import MenuAction
-    from borderlands_gamble.slots import Currency, Symbol
+    from borderlands_gamble.slots import Currency, Symbol, Tier
 
     def ticking() -> bool:
         return hooks.has_hook(TICK_FUNC, hooks.Type.POST, sdk_mod.frame_tick.hook_identifier)
@@ -499,6 +515,13 @@ def main(mods_base_dir: Path) -> None:
     settings_file = sdk_mods / "settings" / "borderlands_gamble.json"
     saved = json.loads(settings_file.read_text())
     assert saved["options"]["stats"]["jackpots"] == 1, saved
+
+    # It's on the leaderboard, with what dropped, and saved
+    [jackpot] = sdk_mod.leaderboard.history
+    assert (jackpot.player, jackpot.charged, jackpot.cash) == ("Moze", 50_000, 50 * 50_000), jackpot
+    assert [drop.tier for drop in jackpot.drops] == [Tier.LEGENDARY] * 2, jackpot
+    assert all(drop.family is not None for drop in jackpot.drops), "the kind of item should be known"
+    assert saved["options"]["leaderboard"]["history"] == [jackpot.to_json()], saved["options"]["leaderboard"]
     assert saved["options"]["stats"]["items"] == {"legendary": 2}, saved
     assert saved["enabled"] is True
 
@@ -546,15 +569,21 @@ def main(mods_base_dir: Path) -> None:
         text = message if isinstance(message, str) else protocol.encode(message)
         return hooks.fire(SERVER_RPC, hooks.Type.PRE, game.friend, WrappedStruct("ServerExecRPC", Msg=text))
 
+    friend_records: list[SpinRecord] = []
+
     def replies_to_friend() -> list[protocol.Message | None]:
-        replies = [protocol.decode(text) for func, text in game.friend.sent if func == "ClientMessage"]
+        """What the host sent Zane, apart from leaderboard records, which go in `friend_records`."""
+        messages = [protocol.decode(text) for func, text in game.friend.sent if func == "ClientMessage"]
         game.friend.sent.clear()
-        return replies
+        friend_records.extend(message for message in messages if isinstance(message, SpinRecord))
+        return [message for message in messages if not isinstance(message, SpinRecord)]
 
     # Every pull the host made so far was shown to Zane, so he could watch
     shows = replies_to_friend()
     assert shows and all(isinstance(m, protocol.Show) and m.player_id == 256 for m in shows), shows
     assert shows[0].line == (Symbol.VAULT,) * 3 and shows[0].stake == 50_000, shows[0]
+    # and once each paid out, Zane got the record for his leaderboard
+    assert friend_records == sdk_mod.leaderboard.history, (friend_records, sdk_mod.leaderboard.history)
 
     assert not from_friend("stat fps"), "other ServerExecRPC traffic must pass through"
     assert from_friend(protocol.Ping(7))
@@ -573,6 +602,12 @@ def main(mods_base_dir: Path) -> None:
     assert game.cash() == host_cash, "the host's own wallet is never touched"
     [(pool, level, (x, _, _))] = game.spawned[spawned_before:]
     assert pool.endswith("_05_legendary") and level == 20 and x > 1200, game.spawned[-1]
+    # Zane's pull goes on the leaderboard, and back to Zane for his
+    assert replies_to_friend() == []
+    zane = friend_records[-1]
+    assert (zane.player, zane.charged, zane.cash) == ("Zane", 20_000, 100_000), zane
+    assert [drop.tier for drop in zane.drops] == [Tier.LEGENDARY] and zane.drops[0].family is not None, zane
+    assert sdk_mod.leaderboard.history[-1] == zane
 
     # The host watches Zane's spin: reels above his head while Moze looks his way...
     [watched] = sdk_mod.spectator.views()
@@ -612,6 +647,10 @@ def main(mods_base_dir: Path) -> None:
     replies_to_friend()
     tick_until_idle()
     assert game.friend.cash() == friend_cash - 20_000 + 20 * 20_000, game.friend.cash()
+    assert replies_to_friend() == []
+    assert (friend_records[-1].player, friend_records[-1].cash) == ("Zane", 20 * 20_000), friend_records[-1]
+    zanes = [record for record in friend_records if record.player == "Zane"]
+    assert len(zanes) == 2, "refused pulls aren't recorded"
 
     # ---- Co-op, as a client: our pulls go to the host over ServerExecRPC ----
     game.pc.authority = False
@@ -651,6 +690,11 @@ def main(mods_base_dir: Path) -> None:
     assert "Rare loot!  2 rare shotguns" in statuses(), statuses()[-6:]
     tick(5.0)
 
+    # The host shares every payout for the leaderboard: its own, ours, and anyone else's
+    record = SpinRecord("Zane", "eridium", (Symbol.RARE,) * 3, 1, 15, 15, 0, 0, (Drop(Tier.RARE, "sg"),) * 2)
+    assert from_host(record)
+    assert sdk_mod.leaderboard.history[-1] == record
+
     commands.run("gamble_coop_test")
     ping = protocol.decode(game.pc.sent[-1][1])
     assert isinstance(ping, protocol.Ping), ping
@@ -672,6 +716,16 @@ def main(mods_base_dir: Path) -> None:
     assert sdk_mod.overlay._root() not in (None, overlay_root), "the overlay should have been rebuilt"
 
     play_in_the_world(game, sdk_mod, commands, hooks, tick, tick_until_idle, statuses, logged, rng, tmp)
+
+    # The whole leaderboard in the console, then cleared
+    commands.run("gamble_leaderboard")
+    lines = logged("info")
+    assert any("Leaderboard: " in line and "by 2 players" in line for line in lines), lines[-12:]
+    assert any("Recent drops: " in line and "legendary" in line for line in lines), lines[-12:]
+    assert any("Recent pulls, newest first:" in line for line in lines), lines[-12:]
+    commands.run("gamble_leaderboard --reset")
+    assert sdk_mod.leaderboard.pulls == 0
+    assert json.loads(settings_file.read_text())["options"]["leaderboard"] == {"players": {}, "history": []}
 
     # Disabling mid-spin still pays out, then tears everything down
     sdk_mod.show_machines_option.value = True
