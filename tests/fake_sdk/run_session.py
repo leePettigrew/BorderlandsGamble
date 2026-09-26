@@ -173,7 +173,7 @@ def play_in_the_world(
     assert "LOOT SLOTS" in statuses()
     click(MenuAction.BET_UP)
     assert sdk_mod.player_settings().bet == 5
-    assert "PULL THE LEVER  ($13,000)" in statuses()
+    assert "PULL THE LEVER  ($250,000)" in statuses()
     saved = json.loads(settings_file.read_text())
     assert saved["options"]["Your Machine"]["bet"] == "5x", saved
 
@@ -191,7 +191,7 @@ def play_in_the_world(
     click(MenuAction.LOOT_NEXT)
     assert sdk_mod.player_settings().loot_type == "guns"
     assert "DROPS: GUNS  +25%" in statuses()
-    assert "PULL THE LEVER  ($6,600)" in statuses()
+    assert "PULL THE LEVER  ($126,000)" in statuses()
     press("Left")
     assert sdk_mod.player_settings().loot_type == "any"
     saved = json.loads(settings_file.read_text())
@@ -202,7 +202,7 @@ def play_in_the_world(
     cash_before = game.cash()
     press("SpaceBar")
     assert sdk_mod.controller.is_spinning
-    assert game.cash() == cash_before - 5200
+    assert game.cash() == cash_before - 100_000
     assert "Spinning..." in statuses()
     assert "SKIP" in statuses()
     click(MenuAction.MACHINE)
@@ -219,7 +219,7 @@ def play_in_the_world(
     assert game.console_commands[-1] == "gbx.ui.view.stateremove CINEMATIC"
     assert game.input_mode == ("GameOnly", None)
     tick_until_idle()
-    assert game.cash() == cash_before - 5200 + 20 * 5200, game.cash()
+    assert game.cash() == cash_before - 100_000 + 20 * 100_000, game.cash()
     assert sdk_mod.overlay._root() is not None, "the HUD should have taken over the spin"
 
     # ---- F8 opens the menu near any machine, and pulls inside it ----
@@ -299,7 +299,7 @@ def play_in_the_world(
     rng.queue = [Symbol.SKULL, Symbol.SKULL, Symbol.CASH]
     cash_before = game.cash()
     commands.run("gamble_spin")
-    assert game.cash() == cash_before - 5200, "a slot machine should count as a machine"
+    assert game.cash() == cash_before - 100_000, "a slot machine should count as a machine"
     tick_until_idle()
 
     commands.run("gamble_machine remove")
@@ -396,7 +396,7 @@ def main(mods_base_dir: Path) -> None:
     mod = gamble.mod
 
     assert mod.name == "Borderlands Gamble", mod.name
-    assert mod.version == "0.4.1", mod.version
+    assert mod.version == "0.4.2", mod.version
     assert not mod.enabling_locked, "mod should be allowed to enable in BL4"
     assert ".sdkmod" in str(sdk_mod.__file__), f"should import from the .sdkmod, not {sdk_mod.__file__}"
 
@@ -479,11 +479,11 @@ def main(mods_base_dir: Path) -> None:
     sdk_mod.casino.rng = rng
     rng.queue = [Symbol.VAULT] * 3
     commands.run("gamble_spin")
-    assert game.cash() == 1_000_000 - 2600, game.cash()
+    assert game.cash() == 1_000_000 - 50_000, game.cash()
     assert sdk_mod.controller.is_spinning
     frames = tick_until_idle()
     assert frames > 10, f"expected an animation, got {frames} frames"
-    assert game.cash() == 1_000_000 - 2600 + 50 * 2600, game.cash()
+    assert game.cash() == 1_000_000 - 50_000 + 50 * 50_000, game.cash()
     assert [pool.endswith("_05_legendary") for pool, _, _ in game.spawned] == [True, True], game.spawned
     assert all(level == 50 for _, level, _ in game.spawned)
     for _, _, (x, y, z) in game.spawned:
@@ -554,7 +554,7 @@ def main(mods_base_dir: Path) -> None:
     # Every pull the host made so far was shown to Zane, so he could watch
     shows = replies_to_friend()
     assert shows and all(isinstance(m, protocol.Show) and m.player_id == 256 for m in shows), shows
-    assert shows[0].line == (Symbol.VAULT,) * 3 and shows[0].stake == 2600, shows[0]
+    assert shows[0].line == (Symbol.VAULT,) * 3 and shows[0].stake == 50_000, shows[0]
 
     assert not from_friend("stat fps"), "other ServerExec traffic must pass through"
     assert from_friend(protocol.Ping(7))
@@ -565,11 +565,11 @@ def main(mods_base_dir: Path) -> None:
     assert from_friend(protocol.Pull(1, "cash", 1))
     [reply] = replies_to_friend()
     assert isinstance(reply, protocol.Result) and reply.line == (Symbol.LEGENDARY,) * 3, reply
-    assert reply.charged == reply.stake == 86, reply  # Zane is level 20
-    assert game.friend.cash() == friend_cash - 86
+    assert reply.charged == reply.stake == 20_000, reply  # Zane is level 20
+    assert game.friend.cash() == friend_cash - 20_000
     spawned_before = len(game.spawned)
     assert from_friend(protocol.Settle(1))
-    assert game.friend.cash() == friend_cash - 86 + 5 * 86
+    assert game.friend.cash() == friend_cash - 20_000 + 5 * 20_000
     assert game.cash() == host_cash, "the host's own wallet is never touched"
     [(pool, level, (x, _, _))] = game.spawned[spawned_before:]
     assert pool.endswith("_05_legendary") and level == 20 and x > 1200, game.spawned[-1]
@@ -590,7 +590,7 @@ def main(mods_base_dir: Path) -> None:
     tick(0.1)
     assert panel_position(panel) == (24, 140), panel_position(panel)
     tick(3.0)
-    assert "LEGENDARY!  +$430, 1 legendary" in statuses(), statuses()[-6:]
+    assert "LEGENDARY!  +$100,000, 1 legendary" in statuses(), statuses()[-6:]
     tick(5.0)
     assert not sdk_mod.spectator.active and sdk_mod.spectators._root().visibility == 1
     game.pc.PlayerCameraManager.view = (0.0, 90.0)
@@ -611,7 +611,7 @@ def main(mods_base_dir: Path) -> None:
     assert from_friend(protocol.Pull(4, "cash", 1))
     replies_to_friend()
     tick_until_idle()
-    assert game.friend.cash() == friend_cash - 86 + 20 * 86, game.friend.cash()
+    assert game.friend.cash() == friend_cash - 20_000 + 20 * 20_000, game.friend.cash()
 
     # ---- Co-op, as a client: our pulls go to the host over ServerExec ----
     game.pc.authority = False

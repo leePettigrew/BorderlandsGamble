@@ -26,18 +26,19 @@ class CostTests(unittest.TestCase):
         self.assertEqual(nice_round(24866), 25000)
         self.assertEqual(nice_round(150), 150)
 
-    def test_cash_cost_grows_with_level(self) -> None:
-        costs = [base_cost(LOOT_SLOTS, level) for level in range(1, 71)]
-        self.assertEqual(costs, sorted(costs))
-        self.assertEqual(costs[0], 10)
-        self.assertEqual(base_cost(LOOT_SLOTS, 0), 10)
+    def test_cash_cost_is_1000_per_level(self) -> None:
+        self.assertEqual(base_cost(LOOT_SLOTS, 1), 1000)
+        self.assertEqual(base_cost(LOOT_SLOTS, 37), 37_000)
+        self.assertEqual(base_cost(LOOT_SLOTS, 50), 50_000)
+        self.assertEqual(base_cost(LOOT_SLOTS, 0), 1000, "an unreadable level counts as 1")
 
     def test_eridium_cost_is_flat(self) -> None:
         self.assertEqual(base_cost(ERIDIUM_SLOTS, 1), base_cost(ERIDIUM_SLOTS, 70))
 
     def test_spin_cost_applies_bet_and_multiplier(self) -> None:
-        self.assertEqual(spin_cost(LOOT_SLOTS, 50, bet=5), 5 * 2600)
-        self.assertEqual(spin_cost(LOOT_SLOTS, 50, cost_multiplier=0.5), 1300)
+        self.assertEqual(spin_cost(LOOT_SLOTS, 50, bet=5), 5 * 50_000)
+        self.assertEqual(spin_cost(LOOT_SLOTS, 50, cost_multiplier=0.5), 25_000)
+        self.assertEqual(spin_cost(LOOT_SLOTS, 37, cost_multiplier=1.25), 46_000)
         self.assertEqual(spin_cost(ERIDIUM_SLOTS, 50, cost_multiplier=0.01), 1)
         with self.assertRaises(ValueError):
             spin_cost(LOOT_SLOTS, 50, bet=0)

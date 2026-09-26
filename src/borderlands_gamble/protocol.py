@@ -21,7 +21,7 @@ from .loot import DEFAULT_LOOT_TYPE
 from .machines import BET_MULTIPLIERS, MACHINES
 from .slots import Line, SpinResult, Symbol, scale_prize
 
-MOD_VERSION = "0.4.1"
+MOD_VERSION = "0.4.2"
 
 PREFIX = "BLGMB"
 PROTOCOL = 1

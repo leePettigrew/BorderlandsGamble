@@ -10,7 +10,7 @@ that the machine drops on the floor in front of it, straight from the game's own
 
 > **Status: early, and tested in the real game once.** In that first test, the slot machine stood in
 > the Launchpad, E opened the menu, and Free Play spins worked. Paid pulls and loot prizes failed.
-> 0.4.1 should fix both, but hasn't been tried in game yet, and neither has co-op. The slot
+> 0.4.2 should fix both, but hasn't been tried in game yet, and neither has co-op. The slot
 > machine engine is fully unit tested, and full solo and co-op sessions run against a simulated game.
 > If anything is off, run `gamble_diag` (see [Troubleshooting](#troubleshooting)).
 
@@ -24,8 +24,8 @@ Wondering how much of this is possible, and what's hard? See [docs/feasibility.m
   awkward, with `gamble_machine`.
 - **A proper menu.** Reels, the paytable with prices at your bet, your wallet, and your lifetime
   stats on one screen. Click the buttons, or use the keyboard or a controller.
-- **Two machines.** *Loot Slots* cost cash and get pricier as you level ($10 at level 1, $2.6k at 50,
-  $25k at 70). *Eridium Slots* cost 10 eridium and roll rarer loot more often.
+- **Two machines.** *Loot Slots* cost $1,000 per level for a 1x pull ($30k at level 30, $50k at
+  50). *Eridium Slots* cost 10 eridium and roll rarer loot more often.
 - **Real loot, your pick.** Loot prizes drop at your level from the game's own item pools: rare, epic,
   and legendary. Leave it on *Anything*, or pick what drops, from guns down to one weapon type, and
   pay a bit more per pull (see [Drops](#drops)).

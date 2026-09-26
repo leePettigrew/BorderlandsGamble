@@ -271,10 +271,10 @@ class CasinoPayoutTests(CasinoTestCase):
     def test_loot_types_change_the_price_and_the_drops(self) -> None:
         casino = self.make_casino([(S.RARE,) * 3, (S.LEGENDARY,) * 3, (S.EPIC,) * 3])
         _, charged = casino.pull(self.player, 1, "cash", 1, "shotguns")
-        self.assertEqual(charged, 3900)
+        self.assertEqual(charged, 75_000)
         casino.settle_all()
         _, charged = casino.pull(self.player, 2, "cash", 2, "class_mods")
-        self.assertEqual(charged, 2 * 5200)
+        self.assertEqual(charged, 2 * 100_000)
         casino.settle_all()
         _, charged = casino.pull(self.player, 3, "eridium", 1, "guns")
         self.assertEqual(charged, 13)
@@ -311,7 +311,7 @@ class CasinoPayoutTests(CasinoTestCase):
         casino = self.make_casino([(S.SKULL, S.CASH, S.EPIC)])
         self.player.level = None
         casino.pull(self.player, 1, "cash", 1)
-        self.assertEqual(self.backend.currency_calls, [("Amara", Currency.CASH, -10)])
+        self.assertEqual(self.backend.currency_calls, [("Amara", Currency.CASH, -1000)])
 
 
 class ControllerTestCase(CasinoTestCase):
@@ -458,7 +458,7 @@ class ControllerTests(ControllerTestCase):
         self.run_until_idle(controller)
         self.assertEqual(self.backend.spawned[0][1], "itempool_sr_03_rare")
         self.assertEqual(self.final_view().status, "Rare loot!  1 rare sniper rifle")
-        self.assertEqual(self.player.balances[Currency.CASH], 1_000_000 - 3900)
+        self.assertEqual(self.player.balances[Currency.CASH], 1_000_000 - 75_000)
 
     def test_resting_view_and_last_result(self) -> None:
         controller = self.make([(S.EPIC, S.CASH, S.VAULT)])

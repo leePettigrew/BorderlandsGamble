@@ -118,7 +118,7 @@ machine_option = SpinnerOption(
     wrap_enabled=True,
     display_name="Machine",
     description=(
-        "Loot Slots cost cash (scaling with your level). Eridium Slots cost eridium, and pay out"
+        "Loot Slots cost $1,000 per level (at a 1x bet). Eridium Slots cost eridium, and pay out"
         " rarer loot more often. You can also switch in the slot machine menu."
     ),
 )
