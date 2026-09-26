@@ -85,6 +85,19 @@ py print([(m.Name, m.bHidden) for m in unrealsdk.find_all("OakVendingMachine", F
 | Screen size | `WidgetLayoutLibrary.GetViewportSize(pc)` / `GetViewportScale(pc)` | MSBT `quick_menu.py` |
 | Per-frame tick | Post-hook on `/Script/Engine.CameraModifier:BlueprintModifyCamera`. It fires several times a frame, so the mod throttles to 60 Hz and only hooks it while the overlay is up | MSBT `camera_tick.py` |
 
+## Co-op
+
+| What | API | Proven by |
+|---|---|---|
+| Client → host message | `pc.ServerExec(text)`: a reliable server RPC on every Unreal `PlayerController`. Its normal job is a dev console, which shipping builds skip | Part of Unreal Engine. BL4 mods call it too (world travel, MSBT `travel.py`) |
+| Host → client message | `pc.ClientMessage(text, "None", 0.0)`: a reliable client RPC on every `PlayerController` | Part of Unreal Engine |
+| Receiving | Pre-hooks on `/Script/Engine.PlayerController:ServerExec` and `:ClientMessage`. unrealsdk hooks `ProcessEvent`, which is how incoming RPCs get dispatched. Our messages start with `BLGMB\|` and are blocked after handling; anything else passes through untouched | unrealsdk's BL4 `ProcessEvent` hook |
+| Acting for a partner | On the host, the hook's `obj` is the sending player's controller, and wallet, level, and loot calls take it directly | MSBT's host-side `givecurrency` for other players |
+
+Outgoing calls are wrapped in `unrealsdk.hooks.prevent_hooking_direct_calls()`, so our own hooks
+don't see them. `gamble_coop_test` checks the whole round trip in a real session. See
+[coop.md](coop.md).
+
 ## Keys
 
 The lever defaults to **F8**, which the other mods we checked don't use (MSBT uses F7, F10, and F11).

@@ -60,8 +60,9 @@ That covers everything a slot machine needs. [game-api.md](game-api.md) has the 
   mid-September 2026 patches ([#16](https://github.com/bl-sdk/oak2-mod-manager/issues/16),
   [#17](https://github.com/bl-sdk/oak2-mod-manager/issues/17)), though other mods were being
   tested live again by September 23. This mod has a `gamble_diag` command to pinpoint which API broke.
-- **Co-op.** Granting currency and spawning loot need authority, so gambling is **host only**. Clients
-  get a clear message instead.
+- **Co-op.** Only the host's game can grant currency and spawn loot. So the host's game acts as the
+  bank for everyone, and clients send their pulls to it over the network (see [coop.md](coop.md)).
+  Every player needs the mod installed, at the same version.
 - **Online.** The [SDK FAQ](https://bl-sdk.github.io/oak2-mod-db/faq/) says the SDK itself won't get
   you banned, but 2K can act on griefing. Keep modded play out of matchmaking.
 - **Real money.** Out of scope, and it should stay that way. The mod only uses in-game currency, with
@@ -70,8 +71,8 @@ That covers everything a slot machine needs. [game-api.md](game-api.md) has the 
 ## Roadmap
 
 1. **MVP (this repo).** Lever keybind at any vending machine, animated overlay reels, cash and eridium
-   machines, loot payouts from the game's pools, bets, luck presets, lifetime stats, exact odds, and
-   diagnostics. The first in-game test is next.
+   machines, loot payouts from the game's pools, bets, luck presets, lifetime stats, exact odds,
+   diagnostics, and co-op with the host as the bank. The first in-game test is next.
 2. **Diegetic machines.** Hook vending-machine interaction (e.g. hold-to-gamble), or spawn dedicated
    "slot machine" actors in hub areas using the proven Spawner approach, and reuse existing game
    sounds.

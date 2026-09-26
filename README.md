@@ -8,9 +8,10 @@ out in cash or eridium, or in real loot that the machine drops at your feet, str
 own item pools.
 
 > **Status: prototype, not yet run in the real game.** The slot machine engine is fully unit tested.
-> The game side is built only from APIs that other published BL4 SDK mods already use, and a full
-> session has been run against a simulated game. It still needs a first in-game test. If anything is
-> off, run `gamble_diag` (see [Troubleshooting](#troubleshooting)).
+> The game side is built only from APIs that other published BL4 SDK mods already use, or that every
+> Unreal game has. Full solo and co-op sessions have been run against a simulated game. It still
+> needs a first in-game test. If anything is off, run `gamble_diag` (see
+> [Troubleshooting](#troubleshooting)).
 
 Wondering how much of this is possible, and what's hard? See [docs/feasibility.md](docs/feasibility.md).
 
@@ -25,6 +26,8 @@ Wondering how much of this is possible, and what's hard? See [docs/feasibility.m
 - **Bets and luck.** Choose a 1x/2x/5x/10x bet and a luck preset from *Stingy* to *Moxxi Likes You*.
 - **Transparent odds.** Exact odds, not simulations: `gamble_odds` prints the full paytable.
 - **Lifetime stats.** Tracks spins, net winnings, jackpots, and items won.
+- **Co-op.** When both players have the mod, the host's game acts as the bank for everyone, and each
+  player gets their own machine. See [docs/coop.md](docs/coop.md).
 
 ### Odds (Fair luck, 1x bet)
 
@@ -49,7 +52,8 @@ The house always keeps an edge on currency; you gamble for the loot. All of this
    into your game's `sdk_mods` folder.
 3. Restart the game, open `mods` in the console, and enable **Borderlands Gamble**.
 
-Single player, or host only in co-op. Keep modded play out of matchmaking.
+Works solo, and in co-op when **everyone installs the same version** (see
+[docs/coop.md](docs/coop.md)). Keep modded play out of matchmaking.
 
 ## Playing
 
@@ -67,9 +71,12 @@ Console commands:
 | `gamble_odds [--machine cash\|eridium] [--luck NAME] [--level N]` | Print the paytable and exact odds. |
 | `gamble_stats [--reset]` | Print or reset your lifetime stats. |
 | `gamble_diag [--wallet]` | Check every game API the mod uses. `--wallet` also test-charges $1 and refunds it. |
+| `gamble_coop_test` | As a co-op client, check the host's mod can hear you. |
 
-Options (in the mods menu): machine, bet, luck, price multiplier, vending machine requirement, free
-play, spin time, result time, loot level, and overlay scale and position.
+Options (in the mods menu):
+- **Your Machine:** machine, bet, spin time, result time, overlay scale and position.
+- **House Rules:** luck, price multiplier, vending machine requirement, free play, and loot level. In
+  co-op, the host's house rules apply to everyone.
 
 ## Troubleshooting
 
@@ -86,17 +93,21 @@ src/borderlands_gamble/   the mod (this folder is what goes in the .sdkmod)
   machines.py   the two machines' reels, paytables and prices
   loot.py       which item pools each prize tier drops from, and where drops land
   animation.py  reel animation timeline
-  casino.py     controller: pull -> charge -> spin -> animate -> pay out
+  casino.py     Casino (the bank) and SlotController (a player's machine)
+  protocol.py   co-op messages
+  coop.py       how host and client handle co-op messages
   stats.py      lifetime stats
-  bl4.py        the game side: currency, level, loot drops, vending machines, diagnostics
+  bl4.py        the game side: wallets, levels, loot drops, vending machines, co-op transport
   overlay.py    the on-screen machine, built from UMG widgets at runtime
   sdk_mod.py    options, keybinds, console commands, frame tick
-tests/          unit tests, plus a fake game for full mod sessions
+tests/          unit tests, plus a fake game for full solo and co-op sessions
 tools/          build_sdkmod.py, odds.py
-docs/           feasibility study and game API notes
+docs/           feasibility study, co-op design, game API notes
 ```
 
 Everything except `bl4.py`, `overlay.py` and `sdk_mod.py` is plain Python with no game dependency.
+Working on it with someone? [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, the dev loop, and the
+rules that keep co-op working.
 
 - **Tests:** `python -m unittest` from the repo root (Python 3.11+). To also run a full session
   through the real [mods_base](https://github.com/bl-sdk/mods_base) inside a simulated game, clone it
