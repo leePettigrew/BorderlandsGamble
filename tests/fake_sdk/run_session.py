@@ -396,15 +396,16 @@ def main(mods_base_dir: Path) -> None:
     mod = gamble.mod
 
     assert mod.name == "Borderlands Gamble", mod.name
-    assert mod.version == "0.4.0", mod.version
+    assert mod.version == "0.4.1", mod.version
     assert not mod.enabling_locked, "mod should be allowed to enable in BL4"
     assert ".sdkmod" in str(sdk_mod.__file__), f"should import from the .sdkmod, not {sdk_mod.__file__}"
 
     from unrealsdk.unreal import WrappedStruct
 
     from borderlands_gamble import protocol
+    from borderlands_gamble.bl4 import TakeMethod
     from borderlands_gamble.menu_model import MenuAction
-    from borderlands_gamble.slots import Symbol
+    from borderlands_gamble.slots import Currency, Symbol
 
     def ticking() -> bool:
         return hooks.has_hook(TICK_FUNC, hooks.Type.POST, sdk_mod.frame_tick.hook_identifier)
@@ -458,10 +459,17 @@ def main(mods_base_dir: Path) -> None:
     # Slot machines in the world are on by default, which keeps the frame tick running
     assert ticking()
 
-    # Diagnostics should find everything in the fake game
+    # Diagnostics should find everything in the fake game. Its GiveCurrency ignores negative amounts
+    # to start with (what the real game might do), so the wallet test finds charges have to write the
+    # wallet instead
     commands.run("gamble_diag --wallet")
     assert any("All good!" in line for line in logged("info")), logged()
     assert game.cash() == 1_000_000, "wallet test should give the dollar back"
+    assert sdk_mod.backend.take_methods == {Currency.CASH: TakeMethod.WRITE}
+    assert any("Charging Cash by writing the wallet" in line for line in logged("info")), logged()
+    assert any("999999, by writing the wallet" in line for line in logged("info")), logged()
+    # Tried -1, then wrote the wallet 1 short and gave the 1 back so the game announces it, then refunded
+    assert game.give_calls == [("Moze", "Cash", -1), ("Moze", "Cash", 1), ("Moze", "Cash", 1)]
 
     commands.run("gamble_odds --machine eridium --luck Generous")
     assert any("Eridium Slots (Generous luck)" in line for line in logged("info"))
@@ -509,6 +517,20 @@ def main(mods_base_dir: Path) -> None:
     assert not sdk_mod.controller.is_spinning
     assert game.pc.CurrencyManager.row("eridium").Amount == eridium_before - 20 + 15 * 20
     tick_until_idle()
+    assert sdk_mod.backend.take_methods[Currency.ERIDIUM] is TakeMethod.WRITE
+
+    # Where GiveCurrency does take negative amounts, charges go through it instead
+    game.negative_gives = True
+    sdk_mod.backend.take_methods.clear()
+    eridium_before = game.pc.CurrencyManager.row("eridium").Amount
+    calls_before = len(game.give_calls)
+    commands.run("gamble_spin")
+    assert game.pc.CurrencyManager.row("eridium").Amount == eridium_before - 20
+    assert game.give_calls[calls_before:] == [("Moze", "eridium", -1), ("Moze", "eridium", -19)]
+    assert sdk_mod.backend.take_methods == {Currency.ERIDIUM: TakeMethod.GIVE}
+    tick_until_idle()
+    game.negative_gives = False
+    sdk_mod.backend.take_methods.clear()
 
     # Too far from a machine
     game.pc.Pawn.location = (50_000.0, 0.0, 0.0)

@@ -22,7 +22,8 @@ py pc = get_pc()
 |---|---|---|
 | Balances | `pc.CurrencyManager.currencies`: rows with `.type` (an `FGbxDefPtr`) and `.Amount` | [MSBT](https://github.com/funkyoushift/MattsSDKBoostingTools) `player_readback.py`, [TrashSeller](https://github.com/FreepDryer/freepdryer-bl4-sdk-mods) |
 | Currency tokens | `Cash`, `eridium`, `VaultCard01_Tokens` … `VaultCard05_Tokens` | MSBT `player_economy.py` |
-| Grant / charge | `GbxCurrencyFunctionLibrary` CDO `.GiveCurrency(pc, FGbxDefPtr(token, <GbxCurrencyDef struct>), amount)` | MSBT `player_economy.py` |
+| Grant | `GbxCurrencyFunctionLibrary` CDO `.GiveCurrency(pc, FGbxDefPtr(token, <GbxCurrencyDef struct>), amount)` | MSBT `player_economy.py` |
+| Charge | A negative `GiveCurrency` if the game takes it, otherwise writing the row's `Amount` | See below |
 
 ```
 py print([(r.type._name, r.Amount) for r in pc.CurrencyManager.currencies])
@@ -32,11 +33,28 @@ py cash = FGbxDefPtr("Cash", unrealsdk.find_object("ScriptStruct", "/Script/GbxG
 py lib.GiveCurrency(pc, cash, 100)
 ```
 
-**Assumption to verify:** charging a pull passes a *negative* amount to `GiveCurrency`. MSBT's
-`givecurrency` command accepts negative amounts, but no mod we know of relies on them. The mod checks
-the balance after every charge, and voids the spin if the money didn't actually leave the wallet. So
-the worst case is "can't charge", never a free win or a lost stake. `gamble_diag --wallet` tests it
-directly by taking $1 and giving it back. If it fails, **Free Play** still works.
+**Charging.** `GiveCurrency` is proven for giving, and the mod's payouts use it. Taking is less
+certain: MSBT's `givecurrency` command accepts negative amounts, but no mod we know of relies on them,
+and in the first in-game test, paid pulls failed while free ones worked. So the first charge of each
+currency in a session starts by giving -1:
+
+- If the wallet drops by 1, the game takes negative amounts, and the rest of the charge goes the same
+  way.
+- If not, the mod writes the wallet row's `Amount` directly. The SDK reads a struct as a view of the
+  game's memory, not a copy, so the write changes the real wallet. It writes 1 short, then gives the
+  1 with `GiveCurrency`, so the game announces the new amount the usual way (the HUD updates, and in
+  co-op the partner's game hears about it).
+
+The console says which it picked, e.g. `Charging Cash by writing the wallet.` Either way, the mod
+checks the balance after every charge, and voids the spin if the money didn't actually leave the
+wallet. So the worst case is "can't charge", never a free win or a lost stake. `gamble_diag --wallet`
+runs the same test by taking $1 and giving it back. If it fails, **Free Play** still works.
+
+```
+py row = [r for r in pc.CurrencyManager.currencies if r.type._name == "Cash"][0]
+py row.Amount = row.Amount - 101
+py lib.GiveCurrency(pc, cash, 1)
+```
 
 ## Player
 
@@ -45,7 +63,12 @@ directly by taking $1 and giving it back. If it fails, **Free Play** still works
 | Player controller | `mods_base.get_pc()` | mods_base |
 | Host check | `pc.HasAuthority()` | MSBT `party_helpers.py` |
 | Level | `pc.PlayerState.BP_GetExperienceLevel(FGbxDefPtr("Character", <GbxExperienceDef struct>))` | MSBT `player_readback.py` |
-| Position / facing | `pc.Pawn.K2_GetActorLocation()`, `.K2_GetActorRotation()`, `.K2_GetActorTransform()` | Unreal built-ins, used throughout MSBT |
+| Position / facing | `pc.Pawn.K2_GetActorLocation()`, `.K2_GetActorRotation()` | Unreal built-ins, used throughout MSBT |
+
+Careful with Unreal's Blueprint names: the "Get Actor Transform" node is the function `GetTransform`.
+There's no `K2_GetActorTransform`, and calling it fails with an `AttributeError`. The fake game's
+player controller, character, and player state are checked against `dir()` dumps of the real ones
+(`tests/fake_sdk/bl4_names.json`), so the tests catch this kind of mistake.
 
 ```
 py from unrealsdk.unreal import FGbxDefPtr
@@ -58,6 +81,7 @@ py print(pc.PlayerState.BP_GetExperienceLevel(xp), pc.HasAuthority())
 | What | API | Proven by |
 |---|---|---|
 | Spawn an item | `NexusConfigStoreItemPool.SpawnInventoryFromItemPool(world, transform, level, pool_name)` | MSBT `shinies.py`, `item_pool_spawning.py` |
+| Transform | `make_struct("Transform", Rotation=<Quat>, Translation=<Vector>, Scale3D=<Vector>)` | MSBT `asd_hybrid.py`, this mod's slot machines |
 | World | `ENGINE.GameViewport.World` | MSBT, [EncoreTweaks](https://github.com/RedxYeti/yeti-bl4-sdk) |
 | Pool names | e.g. `itempool_guns_03_rare`, `itempool_sr_05_legendary`, from the game's own data (v1.10 / build 25234898) | MSBT's `item_pools.json` catalog |
 
@@ -75,7 +99,7 @@ players should see them. That hasn't been tested yet.
 
 ```
 py store = list(unrealsdk.find_all("NexusConfigStoreItemPool", False))[-1]
-py t = pc.Pawn.K2_GetActorTransform()
+py t = pc.Pawn.GetTransform()
 py store.SpawnInventoryFromItemPool(ENGINE.GameViewport.World, t, 50, "itempool_guns_03_rare")
 ```
 

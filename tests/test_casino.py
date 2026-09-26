@@ -50,6 +50,7 @@ class FakePlayer:
 class FakeBackend:
     def __init__(self) -> None:
         self.ignore_charges = False
+        self.fail_charges = False
         self.fail_spawns = False
         self.currency_calls: list[tuple[str, Currency, int]] = []
         self.spawned: list[tuple[str, str, int, int, int]] = []
@@ -74,9 +75,14 @@ class FakeBackend:
 
     def add_currency(self, player: FakePlayer, currency: Currency, amount: int) -> None:
         self.currency_calls.append((player.name, currency, amount))
-        if amount < 0 and self.ignore_charges:
-            return
         player.balances[currency] += amount
+
+    def take_currency(self, player: FakePlayer, currency: Currency, amount: int) -> None:
+        self.currency_calls.append((player.name, currency, -amount))
+        if self.fail_charges:
+            raise RuntimeError("wallet locked")
+        if not self.ignore_charges:
+            player.balances[currency] -= amount
 
     def spawn_item(self, player: FakePlayer, pool: str, level: int, index: int, count: int) -> None:
         if self.fail_spawns:
@@ -154,6 +160,14 @@ class CasinoRefusalTests(CasinoTestCase):
         reply = casino.pull(self.player, 1, "cash", 1)
         self.assertIn("didn't go through", reply)
         self.assertFalse(casino.has_pending)
+
+    def test_charge_that_fails_voids_the_spin(self) -> None:
+        casino = self.make_casino([(S.VAULT,) * 3])
+        self.backend.fail_charges = True
+        reply = casino.pull(self.player, 1, "cash", 1)
+        self.assertIn("Couldn't charge your wallet", reply)
+        self.assertFalse(casino.has_pending)
+        self.assertEqual(self.player.balances[Currency.CASH], 1_000_000)
 
     def test_bad_requests(self) -> None:
         casino = self.make_casino()

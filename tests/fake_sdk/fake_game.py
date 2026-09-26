@@ -141,14 +141,6 @@ class Pawn(FakeObject):
     def K2_GetActorRotation(self) -> WrappedStruct:
         return WrappedStruct("Rotator", Pitch=0.0, Yaw=self.yaw, Roll=0.0)
 
-    def K2_GetActorTransform(self) -> WrappedStruct:
-        return WrappedStruct(
-            "Transform",
-            Translation=vector(*self.location),
-            Rotation=WrappedStruct("Quat", X=0.0, Y=0.0, Z=0.0, W=1.0),
-            Scale3D=vector(1.0, 1.0, 1.0),
-        )
-
 
 class CameraManager(FakeObject):
     """The camera sits at the pawn's eyes, looking wherever `view` says (pitch, yaw)."""
@@ -276,6 +268,8 @@ class CurrencyLibrary(FakeObject):
         if not isinstance(ptr._type, UScriptStruct) or ptr._type.Name != "GbxCurrencyDef":
             raise TypeError("Expected a GbxCurrencyDef pointer")
         self.game.give_calls.append((context.PlayerState.name, ptr._name, amount))
+        if amount < 0 and not self.game.negative_gives:
+            return
         row = context.CurrencyManager.row(ptr._name)
         row.Amount = max(0, min(row.Amount + amount, 2_147_483_647))
 
@@ -288,6 +282,9 @@ class ItemPoolStore(FakeObject):
     def SpawnInventoryFromItemPool(self, world: World, transform: Any, level: int, pool: str) -> None:
         if not isinstance(world, World):
             raise TypeError("Expected a world")
+        q = transform.Rotation
+        if transform.Scale3D.Z != 1.0 or abs(q.X**2 + q.Y**2 + q.Z**2 + q.W**2 - 1.0) > 1e-6:
+            raise ValueError("Expected a transform with a proper rotation and scale")
         t = transform.Translation
         self.game.spawned.append((pool, level, (t.X, t.Y, t.Z)))
 
@@ -752,6 +749,9 @@ class Game:
         self.walls: list[tuple[float, float, float, float]] = []
         self.traces = 0
         self.give_calls: list[tuple[str, str, int]] = []
+        # Whether GiveCurrency takes currency away when given a negative amount. Unknown in the real
+        # game, so the session tries both
+        self.negative_gives = False
         self.spawned: list[tuple[str, int, tuple[float, float, float]]] = []
         self.map_name = "Kairos_P"
         # A safehouse row of two machines along +Y, facing the player, and a lone one far away

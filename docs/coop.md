@@ -23,7 +23,7 @@ loot on the floor in front of their slot machine.
    └─ "settle #1" ─────────── ServerExec ──▶   pay THEIR wallet, drop loot in front of their machine
 ```
 
-- **Messages** are short strings like `BLGMB|1|pull|1|cash.shotguns|1|0.4.0`
+- **Messages** are short strings like `BLGMB|1|pull|1|cash.shotguns|1|0.4.1`
   ([`protocol.py`](../src/borderlands_gamble/protocol.py)). They ride on two network calls that
   every Unreal Engine player controller has: `ServerExec` (client → host; its normal job is a dev
   console, which shipping builds don't use) and `ClientMessage` (host → client). The mod catches
@@ -56,10 +56,10 @@ loot on the floor in front of their slot machine.
 
 ## Testing it together
 
-1. Both install the same build. The version shows next to the mod in the `mods` menu (**0.4.0**).
+1. Both install the same build. The version shows next to the mod in the `mods` menu (**0.4.1**).
 2. Host starts the game; friend joins.
 3. **Friend** runs `gamble_coop_test` in the console. Expected:
-   `Co-op test: the host answered in 45 ms, running v0.4.0` then `all good, pull away!`
+   `Co-op test: the host answered in 45 ms, running v0.4.1` then `all good, pull away!`
 4. Host walks up to the slot machine in a safehouse, presses E, and pulls. This checks the host
    path. The friend should see the host's reels spinning above the host's head.
 5. Friend does the same, at the same slot machine. Check, in order:

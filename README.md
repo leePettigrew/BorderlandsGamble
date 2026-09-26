@@ -8,11 +8,11 @@ above it. Aim at it and press **E**, and the slot machine menu opens: pick a mac
 and a bet, check the paytable, and pull the lever. Wins pay out in cash or eridium, or in real loot
 that the machine drops on the floor in front of it, straight from the game's own item pools.
 
-> **Status: prototype, not yet run in the real game.** The slot machine engine is fully unit tested.
-> The game side is built only from APIs that other published BL4 SDK mods already use, or that every
-> Unreal game has. Full solo and co-op sessions, including walking up to a slot machine and playing
-> through the menu, have been run against a simulated game. It still needs a first in-game test. If
-> anything is off, run `gamble_diag` (see [Troubleshooting](#troubleshooting)).
+> **Status: early, and tested in the real game once.** In that first test, the slot machine stood in
+> the Launchpad, E opened the menu, and Free Play spins worked. Paid pulls and loot prizes failed.
+> 0.4.1 should fix both, but hasn't been tried in game yet, and neither has co-op. The slot
+> machine engine is fully unit tested, and full solo and co-op sessions run against a simulated game.
+> If anything is off, run `gamble_diag` (see [Troubleshooting](#troubleshooting)).
 
 Wondering how much of this is possible, and what's hard? See [docs/feasibility.md](docs/feasibility.md).
 
@@ -80,7 +80,9 @@ The prices and item pools are in [`loot.py`](src/borderlands_gamble/loot.py).
    console with `~` and type `mods`.
 2. Build the mod with `python tools/build_sdkmod.py`, then drop `dist/borderlands_gamble.sdkmod`
    into your game's `sdk_mods` folder.
-3. Restart the game, open `mods` in the console, and enable **Borderlands Gamble**.
+3. Restart the game. Open the console with `~` and type `mods`, then the number next to
+   **Borderlands Gamble**, then `e` to enable it. It stays enabled from then on. If E and F8 do
+   nothing and there are no slot machines, check it doesn't say **(Disabled)** there.
 
 Works solo, and in co-op when **everyone installs the same version** (see
 [docs/coop.md](docs/coop.md)). Keep modded play out of matchmaking.
@@ -139,8 +141,12 @@ console snippets for investigating a failure. If charging breaks but everything 
 
 - **A slot machine is stuck in a wall**, or blocks a door: stand next to it and run
   `gamble_machine remove`. It moves to the other end of the row.
-- **No slot machines appear:** `gamble_diag` reports how many are up. `gamble_machine refresh`
-  rebuilds them, and prints why if one can't be built. F8 next to a vending machine still works.
+- **No slot machines appear:** check the mod is enabled (see [Installing](#installing)).
+  `gamble_diag` reports how many are up. `gamble_machine refresh` rebuilds them, and prints why if one
+  can't be built. F8 next to a vending machine still works.
+- **Paid pulls are refused, but Free Play works:** the console says why. The first paid pull of each
+  currency also says how the mod charges, e.g. `Charging Cash by writing the wallet.`
+  `gamble_diag --wallet` runs the same test with $1.
 - **The menu won't close:** press Esc, click LEAVE, or run `gamble_menu` in the console.
 
 ## Development

@@ -274,16 +274,6 @@ def _parts_of(actor: UObject) -> list[_Part]:
     return parts[:MAX_PARTS]
 
 
-def _transform(location: Vector, rotation: Vector, scale: Vector) -> Any:
-    x, y, z, w = cabinets.rotator_to_quat(*rotation)
-    return unrealsdk.make_struct(
-        "Transform",
-        Rotation=unrealsdk.make_struct("Quat", X=x, Y=y, Z=z, W=w),
-        Translation=unrealsdk.make_struct("Vector", X=location[0], Y=location[1], Z=location[2]),
-        Scale3D=unrealsdk.make_struct("Vector", X=scale[0], Y=scale[1], Z=scale[2]),
-    )
-
-
 def _spawn_actor(class_path: str, transform: Any) -> UObject | None:
     world = ENGINE.GameViewport.World
     statics = unrealsdk.find_class("GameplayStatics").ClassDefaultObject
@@ -334,7 +324,7 @@ def _spawn_part(part: _Part, location: Vector, rotation: Vector) -> UObject | No
         if part.kind == "static"
         else (SKELETAL_MESH_ACTOR, "SkeletalMeshComponent")
     )
-    actor = _spawn_actor(class_path, _transform(location, rotation, part.scale))
+    actor = _spawn_actor(class_path, bl4.make_transform(location, rotation, part.scale))
     if actor is None:
         return None
     try:
@@ -352,7 +342,7 @@ def _spawn_part(part: _Part, location: Vector, rotation: Vector) -> UObject | No
 
 def _spawn_sign(body: cabinets.Body, yaw: float) -> UObject | None:
     location = (body.x, body.y, body.top + SIGN_GAP)
-    actor = _spawn_actor(TEXT_RENDER_ACTOR, _transform(location, (0.0, yaw, 0.0), (1.0, 1.0, 1.0)))
+    actor = _spawn_actor(TEXT_RENDER_ACTOR, bl4.make_transform(location, (0.0, yaw, 0.0)))
     if actor is None:
         return None
     text = actor.TextRender

@@ -36,7 +36,8 @@ write properties, and hook functions. mods_base adds options, keybinds, and cons
 | Need | How | Already done by |
 |---|---|---|
 | Read the wallet | `pc.CurrencyManager.currencies` rows (`type`, `Amount`) | [Matt's SDK Boosting Tools](https://github.com/funkyoushift/MattsSDKBoostingTools) `player_readback.py`, [TrashSeller](https://github.com/FreepDryer/freepdryer-bl4-sdk-mods) |
-| Take/give cash and eridium | `GbxCurrencyFunctionLibrary.GiveCurrency(pc, FGbxDefPtr(token, GbxCurrencyDef), amount)` | Matt's `givecurrency` command (which also accepts negative amounts) |
+| Give cash and eridium | `GbxCurrencyFunctionLibrary.GiveCurrency(pc, FGbxDefPtr(token, GbxCurrencyDef), amount)` | Matt's `givecurrency` command |
+| Take cash and eridium | A negative `GiveCurrency` where the game takes one, otherwise writing the wallet (see [game-api.md](game-api.md#wallet)) | This mod |
 | Know the player's level | `PlayerState.BP_GetExperienceLevel(FGbxDefPtr("Character", GbxExperienceDef))` | Matt's `player_readback.py` |
 | Drop real loot | `NexusConfigStoreItemPool.SpawnInventoryFromItemPool(world, transform, level, pool)` | Matt's shiny and item-pool spawners |
 | Find vending machines | `find_all("OakVendingMachine")` | [GroundLootHelpers](https://github.com/RedxYeti/yeti-bl4-sdk), TrashSeller |

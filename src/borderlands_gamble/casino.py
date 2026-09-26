@@ -108,7 +108,11 @@ class Backend(Protocol):
         ...
 
     def add_currency(self, player: Any, currency: Currency, amount: int) -> None:
-        """Adds (or with a negative amount, removes) currency. Raises on failure."""
+        """Gives a player currency. Raises on failure."""
+        ...
+
+    def take_currency(self, player: Any, currency: Currency, amount: int) -> None:
+        """Takes currency from a player, who has at least that much. Raises on failure."""
         ...
 
     def spawn_item(self, player: Any, pool: str, level: int, index: int, count: int) -> None:
@@ -281,10 +285,9 @@ class Casino:
 
         charged = 0
         if not rules.free_play:
-            charged_or_error = self._charge(player, machine.currency, stake)
-            if isinstance(charged_or_error, str):
-                return charged_or_error
-            charged = charged_or_error
+            if (error := self._charge(player, machine.currency, stake)) is not None:
+                return error
+            charged = stake
 
         result = spin(machine, self.rng, stake=stake, bet=bet)
         self._pending[key] = _PendingPayout(
@@ -341,8 +344,8 @@ class Casino:
         for key in list(self._pending):
             self.settle(key)
 
-    def _charge(self, player: Any, currency: Currency, stake: int) -> int | str:
-        """Charges the stake, verifying it actually left the wallet. Returns an error on failure."""
+    def _charge(self, player: Any, currency: Currency, stake: int) -> str | None:
+        """Charges the stake, checking it actually left the wallet. Returns why not on failure."""
         balance = self.backend.get_balance(player, currency)
         if balance is None:
             return "Couldn't read your wallet - try 'gamble_diag'."
@@ -351,7 +354,7 @@ class Casino:
             return f"Not enough {name}: a pull costs {format_amount(currency, stake)}."
 
         try:
-            self.backend.add_currency(player, currency, -stake)
+            self.backend.take_currency(player, currency, stake)
         except Exception as ex:  # noqa: BLE001 - anything from the game is reported the same way
             self.log(f"Charging {stake} {currency.value} failed: {ex!r}")
             return "Couldn't charge your wallet - try 'gamble_diag'."
@@ -360,7 +363,7 @@ class Casino:
         if after is None or after > balance - stake:
             self.log(f"Charge of {stake} {currency.value} didn't apply ({balance} -> {after}).")
             return "Charge didn't go through, so no spin - try 'gamble_diag'."
-        return balance - after
+        return None
 
     def _pay(self, player: Any, currency: Currency, amount: int) -> tuple[int, str | None]:
         """Pays out currency, clamped to what the wallet can hold. Returns (paid, error)."""
