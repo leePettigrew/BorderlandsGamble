@@ -38,8 +38,12 @@ def inject_next_call() -> None:
     pass
 
 
+# Every call to `log_all_calls`, for tests to check
+LOG_ALL_CALLS: list[bool] = []
+
+
 def log_all_calls(should_log: bool) -> None:
-    pass
+    LOG_ALL_CALLS.append(should_log)
 
 
 @contextmanager

@@ -23,7 +23,17 @@ class PackagingTests(unittest.TestCase):
             names = zipfile.ZipFile(output).namelist()
             self.assertTrue(all(name.startswith("borderlands_gamble/") for name in names))
             self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") for name in names))
-            for module in ("__init__.py", "sdk_mod.py", "slots.py", "bl4.py", "overlay.py"):
+            for module in (
+                "__init__.py",
+                "sdk_mod.py",
+                "slots.py",
+                "bl4.py",
+                "overlay.py",
+                "cabinets.py",
+                "world.py",
+                "menu.py",
+                "menu_model.py",
+            ):
                 self.assertIn(f"borderlands_gamble/{module}", names)
 
     def test_validate_rejects_bad_layouts(self) -> None:

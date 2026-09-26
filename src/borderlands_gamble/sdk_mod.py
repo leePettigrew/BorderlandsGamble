@@ -1,10 +1,12 @@
-"""Wires the slot machine up to the SDK: options, keybinds, console commands, co-op, and the frame tick."""
+"""Wires the slot machines up to the SDK: options, keybinds, console commands, co-op, and the frame tick."""
 
 from __future__ import annotations
 
 import argparse
 import random
+import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mods_base import (
@@ -21,16 +23,22 @@ from mods_base import (
     keybind,
 )
 from unrealsdk import logging
-from unrealsdk.hooks import Type
+from unrealsdk.hooks import Block, Type, log_all_calls
 
-from . import bl4, coop, protocol
-from .casino import Casino, HouseRules, LocalLink, PlayerSettings, RemoteLink, SlotController
-from .machines import BET_MULTIPLIERS, DEFAULT_LUCK, LUCK_PRESETS, MACHINES
-from .overlay import POSITIONS, UmgOverlay
+from . import bl4, coop, protocol, world
+from .cabinets import MachineOverrides
+from .casino import Casino, DisplaySwitch, HouseRules, LocalLink, PlayerSettings, RemoteLink, SlotController
+from .machines import BET_MULTIPLIERS, DEFAULT_LUCK, LUCK_PRESETS, MACHINES, spin_cost
+from .menu import IDLE_STATUS, SlotMenu
+from .menu_model import ActionGate, MenuAction, MenuInfo, build_menu_info, next_bet, next_machine
+from .overlay import POSITIONS, UmgOverlay, UmgPrompt
 from .report import odds_report
+from .slots import Currency
 from .stats import Stats
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mods_base import Mod
     from unrealsdk.unreal import UObject
 
@@ -38,19 +46,36 @@ if TYPE_CHECKING:
 
 PREFIX = "[Borderlands Gamble]"
 
-# How close you need to be to a vending machine to gamble at it, in Unreal units (cm).
+# How close you need to be to a machine to gamble at it, in Unreal units (cm).
 MACHINE_RADIUS = 600.0
+# How close you need to be to one of the mod's slot machines to remove it by command.
+REMOVE_RADIUS = 500.0
 
 # The camera tick fires several times a frame, so cap how often we actually do work.
 TICK_INTERVAL = 1 / 60
+# How often to look for vending machines that streamed in, and put up slot machines by them.
+WORLD_INTERVAL = 5.0
+# How often to check what the player is aiming at, for the "press E" prompt.
+AIM_INTERVAL = 0.1
+# How often to refresh the menu's wallet, prices and stats.
+MENU_INFO_INTERVAL = 0.5
+# How long to reuse a read of the player's level for.
+LEVEL_CACHE_SECONDS = 5.0
+# How often the same background error gets logged.
+ERROR_LOG_INTERVAL = 30.0
 
 # How long `gamble_coop_test` waits for the host to answer.
 PING_TIMEOUT = 5.0
+
+# What `gamble_trace` looks for in the game's function calls.
+TRACE_WORDS = ("usable", "interact", "vending", "vendor", "shop", "onused", "_use", "use_")
+TRACE_FILE = "unrealsdk.calls.tsv"
 
 MACHINE_CHOICES = {
     "Loot Slots (cash)": "cash",
     "Eridium Slots": "eridium",
 }
+MACHINE_LABELS = {key: label for label, key in MACHINE_CHOICES.items()}
 
 
 def log(message: str) -> None:
@@ -68,7 +93,7 @@ machine_option = SpinnerOption(
     display_name="Machine",
     description=(
         "Loot Slots cost cash (scaling with your level). Eridium Slots cost eridium, and pay out"
-        " rarer loot more often."
+        " rarer loot more often. You can also switch in the slot machine menu."
     ),
 )
 bet_option = SpinnerOption(
@@ -99,6 +124,16 @@ result_time_option = SliderOption(
     display_name="Result Time",
     description="How long, in seconds, the result stays on screen.",
 )
+menu_scale_option = SliderOption(
+    "menu_scale",
+    1.0,
+    0.5,
+    1.5,
+    0.05,
+    is_integer=False,
+    display_name="Menu Scale",
+    description="How big to draw the slot machine menu.",
+)
 ui_scale_option = SliderOption(
     "ui_scale",
     1.0,
@@ -106,15 +141,56 @@ ui_scale_option = SliderOption(
     2.0,
     0.05,
     is_integer=False,
-    display_name="Overlay Scale",
-    description="How big to draw the slot machine.",
+    display_name="HUD Reels Scale",
+    description="How big to draw the reels on your HUD, e.g. after a Quick Pull.",
 )
 ui_position_option = SpinnerOption(
     "ui_position",
     POSITIONS[0],
     list(POSITIONS),
-    display_name="Overlay Position",
-    description="Where on screen to draw the slot machine.",
+    display_name="HUD Reels Position",
+    description="Where on screen to draw the reels on your HUD.",
+)
+
+# ==================================================================================================
+# Options - slot machines in the world
+
+
+def _on_show_machines(_: BoolOption, value: bool) -> None:
+    global _next_world_update
+    if value:
+        # Put them up straight away. The option only takes its new value after this returns
+        _next_world_update = 0.0
+        frame_tick.enable()
+    else:
+        if slot_machines is not None:
+            slot_machines.clear()
+        if prompt is not None:
+            prompt.hide()
+
+
+def _on_signs(_: BoolOption, value: bool) -> None:
+    # Put the machines back up with (or without) their signs
+    if slot_machines is not None:
+        slot_machines.clear()
+
+
+show_machines_option = BoolOption(
+    "show_machines",
+    True,
+    display_name="Slot Machines In Safehouses",
+    description=(
+        "Puts a slot machine at the end of each row of vending machines. Aim at one and press the"
+        " Use Slot Machine key (E) to play. In co-op, each player's game puts up its own."
+    ),
+    on_change_while_enabled=_on_show_machines,
+)
+signs_option = BoolOption(
+    "machine_signs",
+    True,
+    display_name="Slot Machine Signs",
+    description="Floats a SLOTS sign above each slot machine.",
+    on_change_while_enabled=_on_signs,
 )
 
 # ==================================================================================================
@@ -143,8 +219,8 @@ cost_option = SliderOption(
 require_machine_option = BoolOption(
     "require_machine",
     True,
-    display_name="Only At Vending Machines",
-    description="Only let the lever be pulled while standing next to a vending machine.",
+    display_name="Only At Machines",
+    description="Only let the lever be pulled next to a slot machine or vending machine.",
 )
 free_play_option = BoolOption(
     "free_play",
@@ -163,6 +239,7 @@ loot_level_option = SliderOption(
 )
 
 stats_option: HiddenOption[Any] = HiddenOption("stats", {})
+placed_machines_option: HiddenOption[Any] = HiddenOption("placed_machines", {})
 
 
 def _print_odds(_: ButtonOption) -> None:
@@ -202,13 +279,32 @@ def house_rules() -> HouseRules:
 
 backend: bl4.BL4Backend | None = None
 overlay: UmgOverlay | None = None
+prompt: UmgPrompt | None = None
+menu: SlotMenu | None = None
+display: DisplaySwitch | None = None
 casino: Casino | None = None
 channel: bl4.CoopChannel | None = None
 controller: SlotController | None = None
+slot_machines: world.SlotMachines | None = None
+overrides: MachineOverrides = MachineOverrides()
 stats: Stats = Stats()
+gate: ActionGate | None = None
+
 _last_tick = 0.0
+_next_world_update = 0.0
+_next_aim_check = 0.0
+_next_menu_info = 0.0
+# (level, when it was read)
+_level_cache: tuple[int | None, float] | None = None
+# When the last error was logged, per background job
+_last_errors: dict[str, float] = {}
 # (nonce, when it was sent) of an outstanding `gamble_coop_test` ping
 _ping: tuple[int, float] | None = None
+# When a running `gamble_trace` should stop
+_trace_until: float | None = None
+# Menu work asked for by a keybind: an action, or None to open it. Done on the next frame, rather
+# than while the game is still in the middle of handling the key press.
+_menu_requests: list[MenuAction | None] = []
 
 
 class SmartLink:
@@ -233,11 +329,24 @@ def save_stats(new_stats: Stats) -> None:
     stats_option.save()
 
 
+def save_overrides() -> None:
+    placed_machines_option.value = overrides.to_json()
+    placed_machines_option.save()
+
+
+def _world_active() -> bool:
+    return slot_machines is not None and show_machines_option.value
+
+
 def _needs_tick() -> bool:
     return (
         (controller is not None and controller.needs_tick)
         or (casino is not None and casino.has_pending)
+        or (menu is not None and menu.is_open)
+        or bool(_menu_requests)
+        or _world_active()
         or _ping is not None
+        or _trace_until is not None
     )
 
 
@@ -254,9 +363,21 @@ def _tick_ping(now: float) -> None:
         log(f"Co-op test: both players need v{protocol.MOD_VERSION}, and the host needs to run it too.")
 
 
+def _guarded(name: str, job: Callable[[float], None], now: float) -> None:
+    """Runs a background job, logging (now and then) rather than raising if it fails."""
+    try:
+        job(now)
+    except Exception as ex:  # noqa: BLE001 - one broken job mustn't stop the others
+        if now - _last_errors.get(name, -ERROR_LOG_INTERVAL) >= ERROR_LOG_INTERVAL:
+            _last_errors[name] = now
+            logging.error(f"{PREFIX} Updating the {name} failed: {ex!r}")
+        if name == "menu":
+            close_menu()
+
+
 @hook("/Script/Engine.CameraModifier:BlueprintModifyCamera", Type.POST)
 def frame_tick(*_: Any) -> None:
-    """Drives animations and co-op timeouts. Only enabled while something needs it."""
+    """Drives animations, the menu, slot machines in the world, and co-op timeouts."""
     global _last_tick
     now = time.monotonic()
     if now - _last_tick < TICK_INTERVAL:
@@ -272,6 +393,11 @@ def frame_tick(*_: Any) -> None:
     except Exception as ex:  # noqa: BLE001 - stop ticking rather than erroring every frame
         logging.error(f"{PREFIX} Tick failed: {ex!r}")
         _shutdown_runtime()
+        return
+
+    _guarded("menu", _tick_menu, now)
+    _guarded("slot machines", _tick_world, now)
+    _guarded("trace", _tick_trace, now)
     if not _needs_tick():
         frame_tick.disable()
 
@@ -281,7 +407,187 @@ def pull_lever() -> None:
         logging.warning(f"{PREFIX} Enable the mod first.")
         return
     controller.pull()
+    _refresh_menu_info()
     _ensure_ticking()
+
+
+# ==================================================================================================
+# The menu
+
+
+def _player_level(pc: UObject) -> int | None:
+    global _level_cache
+    now = time.monotonic()
+    if _level_cache is None or now - _level_cache[1] >= LEVEL_CACHE_SECONDS:
+        level = backend.player_level(pc) if backend is not None else None
+        _level_cache = (level, now)
+    return _level_cache[0]
+
+
+def _wallet(pc: UObject) -> dict[Currency, int | None]:
+    try:
+        rows = {name.lower(): amount for name, amount in backend.currency_rows(pc).items()} if backend else {}
+    except Exception:  # noqa: BLE001 - shown as unknown
+        rows = {}
+    return {currency: rows.get(currency.value.lower()) for currency in Currency}
+
+
+def _menu_info() -> MenuInfo:
+    assert controller is not None
+    settings = player_settings()
+    machine = MACHINES[settings.machine_key]
+    rules = house_rules()
+    host = bl4.is_host()
+    pc = bl4.local_player()
+
+    price: int | None = None
+    if host and pc is not None:
+        level = _player_level(pc)
+        if level is not None:
+            price = spin_cost(machine, level, bet=settings.bet, cost_multiplier=rules.cost_multiplier)
+    elif (last := controller.last_result) is not None and last.machine_key == settings.machine_key:
+        # A client only learns the host's prices from what it's been charged
+        price = last.stake // last.bet * settings.bet
+
+    luck = luck_option.value if luck_option.value in LUCK_PRESETS else DEFAULT_LUCK
+    return build_menu_info(
+        settings.machine_key,
+        bet=settings.bet,
+        price=price,
+        free_play=host and rules.free_play,
+        luck_name=luck,
+        is_host=host,
+        wallet=_wallet(pc) if pc is not None else {},
+        stats=stats,
+        busy=controller.is_waiting or controller.is_spinning,
+        spinning=controller.is_spinning,
+        pull_key=open_menu_keybind.key,
+    )
+
+
+def _refresh_menu_info() -> None:
+    global _next_menu_info
+    if menu is not None and menu.is_open and controller is not None:
+        menu.set_info(_menu_info())
+        _next_menu_info = time.monotonic() + MENU_INFO_INTERVAL
+
+
+def request_menu(action: MenuAction | None = None) -> None:
+    """Opens the menu (or with an action, does it in the menu) on the next frame."""
+    _menu_requests.append(action)
+    frame_tick.enable()
+
+
+def open_menu() -> None:
+    if menu is None or controller is None or display is None or backend is None:
+        logging.warning(f"{PREFIX} Enable the mod first.")
+        return
+    if menu.is_open:
+        return
+    pc = bl4.local_player()
+    if pc is None or pc.Pawn is None:
+        log("Load into the game first.")
+        return
+    settings = player_settings()
+    if require_machine_option.value and not backend.is_near_machine(pc, MACHINE_RADIUS):
+        # Pulls would be refused anyway, and a menu that stops you moving is no fun mid fight
+        controller.notify("Find a slot machine or vending machine to gamble at.", settings.machine_key)
+        _ensure_ticking()
+        return
+    # The mod's own keybinds work in the menu too. They're watched directly as well, in case the game
+    # doesn't pass keys to keybinds while the menu has focus
+    extra_keys = {
+        key: action
+        for key, action in (
+            (open_menu_keybind.key, MenuAction.PULL),
+            (use_machine_keybind.key, MenuAction.LEAVE),
+        )
+        if key is not None
+    }
+    if not menu.open(_menu_info(), controller.resting_view(settings.machine_key, IDLE_STATUS), extra_keys):
+        log("Couldn't open the slot machine menu - see the errors above.")
+        return
+    # Carry over a spin that's still going on the HUD
+    display.switch("menu")
+    if prompt is not None:
+        prompt.hide()
+    _ensure_ticking()
+
+
+def close_menu() -> None:
+    if menu is None or not menu.is_open:
+        return
+    menu.close()
+    if display is not None:
+        display.switch("hud")
+
+
+def on_menu_action(action: MenuAction) -> None:
+    """Handles a button clicked or key pressed in the menu."""
+    if controller is None or menu is None or gate is None or not gate.allow(action):
+        return
+    busy = controller.is_waiting or controller.is_spinning
+    settings = player_settings()
+    match action:
+        case MenuAction.PULL:
+            pull_lever()
+        case MenuAction.LEAVE:
+            close_menu()
+        case MenuAction.MACHINE if not busy:
+            new_machine = next_machine(settings.machine_key)
+            machine_option.value = MACHINE_LABELS[new_machine]
+            mod.save_settings()
+            menu.render(controller.resting_view(new_machine, IDLE_STATUS))
+        case MenuAction.BET_UP | MenuAction.BET_DOWN if not busy:
+            bet = next_bet(settings.bet, 1 if action is MenuAction.BET_UP else -1)
+            bet_option.value = f"{bet}x"
+            mod.save_settings()
+        case _:
+            pass
+    _refresh_menu_info()
+
+
+def _tick_menu(now: float) -> None:
+    requests = _menu_requests[:]
+    _menu_requests.clear()
+    for request in requests:
+        if request is None:
+            open_menu()
+        elif menu is not None and menu.is_open:
+            on_menu_action(request)
+
+    if menu is None or not menu.is_open:
+        return
+    menu.tick()
+    if menu.is_open and now >= _next_menu_info:
+        _refresh_menu_info()
+
+
+# ==================================================================================================
+# Slot machines in the world
+
+
+def _tick_world(now: float) -> None:
+    global _next_world_update, _next_aim_check
+    if slot_machines is None or not show_machines_option.value:
+        return
+    if now >= _next_world_update:
+        _next_world_update = now + WORLD_INTERVAL
+        slot_machines.update()
+    if now >= _next_aim_check:
+        _next_aim_check = now + AIM_INTERVAL
+        _update_prompt()
+
+
+def _update_prompt() -> None:
+    if prompt is None or slot_machines is None:
+        return
+    key = use_machine_keybind.key or open_menu_keybind.key
+    if key is None or (menu is not None and menu.is_open) or slot_machines.aimed_at() is None:
+        prompt.hide()
+        return
+    machine = MACHINES[player_settings().machine_key]
+    prompt.show(f"[{key}]  PLAY {machine.name.upper()}")
 
 
 # ==================================================================================================
@@ -321,34 +627,140 @@ def _on_pong(pong: protocol.Pong) -> None:
 # Keybinds
 
 
-@keybind("Pull The Lever", "F8", description="Spins the slot machine. Press again to skip the spin.")
-def pull_lever_keybind() -> None:
+@keybind(
+    "Open Slot Machine",
+    "F8",
+    description="Opens the slot machine menu, wherever you are. While it's open, pulls the lever.",
+)
+def open_menu_keybind() -> None:
+    request_menu(MenuAction.PULL if menu is not None and menu.is_open else None)
+
+
+@keybind(
+    "Use Slot Machine",
+    "E",
+    description=(
+        "Plays the slot machine you're looking at. Only takes the key over while you aim at one of"
+        " the mod's slot machines, so it keeps working as normal everywhere else."
+    ),
+)
+def use_machine_keybind() -> type[Block] | None:
+    if menu is not None and menu.is_open:
+        request_menu(MenuAction.LEAVE)
+        return Block
+    if slot_machines is None or not show_machines_option.value:
+        return None
+    try:
+        aimed = slot_machines.aimed_at()
+    except Exception as ex:  # noqa: BLE001 - never break the game's own use key
+        logging.error(f"{PREFIX} Couldn't check what you're aiming at: {ex!r}")
+        return None
+    if aimed is None:
+        return None
+    request_menu()
+    return Block
+
+
+@keybind(
+    "Quick Pull",
+    description="Pulls the lever without opening the menu, with the reels on your HUD. Press again to skip.",
+)
+def quick_pull_keybind() -> None:
     pull_lever()
-
-
-@keybind("Switch Machine", description="Swaps between Loot Slots and Eridium Slots.")
-def switch_machine_keybind() -> None:
-    choices = list(MACHINE_CHOICES)
-    machine_option.value = choices[(choices.index(machine_option.value) + 1) % len(choices)]
-    mod.save_settings()
-    log(f"Switched to {machine_option.value}.")
-
-
-@keybind("Change Bet", description="Cycles through the bet multipliers.")
-def change_bet_keybind() -> None:
-    choices = bet_option.choices
-    bet_option.value = choices[(choices.index(bet_option.value) + 1) % len(choices)]
-    mod.save_settings()
-    log(f"Bet set to {bet_option.value}.")
 
 
 # ==================================================================================================
 # Console commands
 
 
-@command("gamble_spin", description="Pulls the lever once, as if you pressed the keybind.")
+@command("gamble_spin", description="Pulls the lever once, showing the reels on your HUD.")
 def spin_command(_: argparse.Namespace) -> None:
     pull_lever()
+
+
+@command("gamble_menu", description="Opens the slot machine menu, or closes it if it's open.")
+def menu_command(_: argparse.Namespace) -> None:
+    if menu is not None and menu.is_open:
+        close_menu()
+    else:
+        open_menu()
+
+
+@command("gamble_machine", description="Lists, adds, or removes the slot machines on this map.")
+def machine_command(args: argparse.Namespace) -> None:
+    if slot_machines is None:
+        log("Enable the mod first.")
+        return
+    pc = bl4.local_player()
+    map_name = world.current_map()
+    if pc is None or pc.Pawn is None or map_name is None:
+        log("Load into the game first.")
+        return
+    loc = pc.Pawn.K2_GetActorLocation()
+
+    match args.action:
+        case "add":
+            spot = world.player_spot(pc)
+            if spot is None:
+                log("Load into the game first.")
+                return
+            overrides.add(map_name, spot)
+            save_overrides()
+            slot_machines.update()
+            log("Added a slot machine in front of you. 'gamble_machine remove' takes it away again.")
+        case "remove":
+            nearest = slot_machines.keeper.nearest(loc.X, loc.Y, loc.Z)
+            if nearest is None or nearest[1] > REMOVE_RADIUS:
+                log(f"There's no slot machine within {REMOVE_RADIUS / 100:.0f} m of you.")
+                return
+            cabinet = nearest[0]
+            overrides.remove(map_name, cabinet.spot, automatic=cabinet.automatic)
+            save_overrides()
+            slot_machines.update()
+            if cabinet.automatic:
+                log("Removed. If this group of vending machines has another free spot, it moves there.")
+            else:
+                log("Removed.")
+        case "reset":
+            overrides.reset(map_name)
+            save_overrides()
+            slot_machines.clear()
+            slot_machines.update()
+            log(f"Put the slot machines on {map_name} back to normal.")
+        case "refresh":
+            slot_machines.clear()
+            slot_machines.update()
+            log("Rebuilt the slot machines nearby.")
+        case _:
+            cabinets = sorted(
+                slot_machines.cabinets,
+                key=lambda c: c.spot.distance_to(loc.X, loc.Y, loc.Z),
+            )
+            log(f"{len(cabinets)} slot machine(s) up on {map_name}:")
+            for cabinet in cabinets:
+                spot = cabinet.spot
+                log(
+                    f"  {'automatic' if cabinet.automatic else 'placed by you'},"
+                    f" {spot.distance_to(loc.X, loc.Y, loc.Z) / 100:.0f} m away"
+                    f" at ({spot.x:.0f}, {spot.y:.0f}, {spot.z:.0f})",
+                )
+            log(
+                f"Your changes on this map: {len(overrides.added.get(map_name, []))} added,"
+                f" {len(overrides.removed.get(map_name, []))} removed.",
+            )
+
+
+machine_command.add_argument(
+    "action",
+    nargs="?",
+    default="list",
+    choices=("list", "add", "remove", "reset", "refresh"),
+    help=(
+        "list: show them. add: put one in front of you. remove: take away the nearest one (an"
+        " automatic one moves to its next spot). reset: undo your changes on this map. refresh:"
+        " rebuild them."
+    ),
+)
 
 
 @command("gamble_odds", description="Prints a machine's paytable and exact odds.")
@@ -401,6 +813,8 @@ def diag_command(args: argparse.Namespace) -> None:
         log(str(check))
     failed = sum(1 for check in checks if not check.ok)
     log("All good!" if not failed else f"{failed} check(s) failed - see docs/game-api.md.")
+    if slot_machines is not None:
+        log(f"Slot machines up on this map: {len(slot_machines.cabinets)}.")
 
 
 diag_command.add_argument(
@@ -430,33 +844,96 @@ def coop_test_command(_: argparse.Namespace) -> None:
     _ensure_ticking()
 
 
+@command(
+    "gamble_trace",
+    description="For research: records every game function call for a few seconds.",
+)
+def trace_command(args: argparse.Namespace) -> None:
+    global _trace_until
+    if _trace_until is not None:
+        log("A trace is already running.")
+        return
+    seconds = max(1.0, min(float(args.seconds), 30.0))
+    log_all_calls(True)
+    _trace_until = time.monotonic() + seconds
+    log(f"Recording for {seconds:g} seconds - use a vending machine now! The game may stutter a little.")
+    _ensure_ticking()
+
+
+trace_command.add_argument("--seconds", type=float, default=6.0, help="How long to record for.")
+
+
+def _tick_trace(now: float) -> None:
+    global _trace_until
+    if _trace_until is None or now < _trace_until:
+        return
+    _trace_until = None
+    log_all_calls(False)
+    _summarize_trace()
+
+
+def _summarize_trace() -> None:
+    plugins = Path(sys.executable).parent / "Plugins"
+    path = next((p for p in (plugins / TRACE_FILE, plugins.parent / TRACE_FILE) if p.exists()), None)
+    if path is None:
+        log(f"Recording done. It's saved as {TRACE_FILE}, in OakGame/Binaries/Win64/Plugins.")
+        return
+
+    counts: dict[str, int] = {}
+    with path.open(encoding="utf-8", errors="replace") as file:
+        for line in file:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) >= 2 and any(word in line.lower() for word in TRACE_WORDS):
+                counts[fields[1]] = counts.get(fields[1], 0) + 1
+    log(f"Recording done, saved to {path}. Calls that look use-related:")
+    for func, count in sorted(counts.items(), key=lambda item: -item[1])[:40]:
+        log(f"  {count:>7,}  {func}")
+    if not counts:
+        log("  none found")
+
+
 # ==================================================================================================
 # Lifecycle
 
 
 def on_enable() -> None:
-    global backend, overlay, casino, channel, controller, stats
+    global backend, overlay, prompt, menu, display, casino, channel, controller, slot_machines
+    global overrides, stats, gate
     # Settings, including saved stats, are always loaded before the mod first gets enabled
     stats = Stats.from_json(stats_option.value)
-    backend = bl4.BL4Backend()
+    overrides = MachineOverrides.from_json(placed_machines_option.value)
+    slot_machines = world.SlotMachines(lambda: overrides, lambda: bool(signs_option.value))
+    backend = bl4.BL4Backend(slot_machines.spots)
     overlay = UmgOverlay(lambda: (float(ui_scale_option.value), str(ui_position_option.value)))
+    prompt = UmgPrompt()
+    menu = SlotMenu(on_menu_action, lambda: float(menu_scale_option.value))
+    display = DisplaySwitch({"hud": overlay, "menu": menu}, "hud")
     casino = Casino(backend, house_rules, log=log)
     channel = bl4.CoopChannel(on_host_message, on_client_message)
     channel.enable()
     controller = SlotController(
         SmartLink(LocalLink(casino, bl4.local_player), RemoteLink(channel.send_to_host)),
-        overlay,
+        display,
         settings=player_settings,
         stats=stats,
         on_stats_changed=save_stats,
         log=log,
     )
+    gate = ActionGate(lambda: time.monotonic())
+    _ensure_ticking()
 
 
 def _shutdown_runtime() -> None:
-    global _ping
+    global _ping, _trace_until
     _ping = None
+    _menu_requests.clear()
+    if _trace_until is not None:
+        _trace_until = None
+        log_all_calls(False)
     frame_tick.disable()
+    close_menu()
+    if prompt is not None:
+        prompt.hide()
     if controller is not None:
         controller.shutdown()
     if casino is not None:
@@ -464,13 +941,17 @@ def _shutdown_runtime() -> None:
 
 
 def on_disable() -> None:
-    global backend, overlay, casino, channel, controller
+    global backend, overlay, prompt, menu, display, casino, channel, controller, slot_machines, gate
     _shutdown_runtime()
     if channel is not None:
         channel.disable()
+    if slot_machines is not None:
+        slot_machines.clear()
+    if prompt is not None:
+        prompt.destroy()
     if overlay is not None:
         overlay.destroy()
-    backend = overlay = casino = channel = controller = None
+    backend = overlay = prompt = menu = display = casino = channel = controller = slot_machines = gate = None
 
 
 mod: Mod = build_mod(
@@ -482,10 +963,12 @@ mod: Mod = build_mod(
                 bet_option,
                 spin_time_option,
                 result_time_option,
+                menu_scale_option,
                 ui_scale_option,
                 ui_position_option,
             ],
         ),
+        GroupedOption("Slot Machines", [show_machines_option, signs_option]),
         GroupedOption(
             "House Rules",
             [luck_option, cost_option, require_machine_option, free_play_option, loot_level_option],
@@ -502,11 +985,21 @@ mod: Mod = build_mod(
             description="Forgets your lifetime winnings and losses.",
         ),
         stats_option,
+        placed_machines_option,
     ],
-    keybinds=[pull_lever_keybind, switch_machine_keybind, change_bet_keybind],
+    keybinds=[open_menu_keybind, use_machine_keybind, quick_pull_keybind],
     # The frame tick is enabled on demand, not whenever the mod is
     hooks=[],
-    commands=[spin_command, run_odds_command, run_stats_command, diag_command, coop_test_command],
+    commands=[
+        spin_command,
+        menu_command,
+        machine_command,
+        run_odds_command,
+        run_stats_command,
+        diag_command,
+        coop_test_command,
+        trace_command,
+    ],
     settings_file=SETTINGS_DIR / "borderlands_gamble.json",
     on_enable=on_enable,
     on_disable=on_disable,

@@ -21,7 +21,7 @@ from . import loot, protocol
 from .slots import Currency
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from unrealsdk.unreal import BoundFunction, WrappedStruct
 
@@ -41,7 +41,7 @@ CLIENT_RPC = "/Script/Engine.PlayerController:ClientMessage"
 COOP_HOOK_ID = "borderlands_gamble.coop"
 
 
-def _is_template(obj: UObject) -> bool:
+def is_template(obj: UObject) -> bool:
     return str(obj.Name).startswith("Default__")
 
 
@@ -90,6 +90,17 @@ def is_host() -> bool:
         return True
 
 
+def run_console_command(pc: UObject, text: str) -> bool:
+    """Runs a game console command, as if it was typed into the console. Returns if it could."""
+    try:
+        library = unrealsdk.find_class("KismetSystemLibrary").ClassDefaultObject
+        library.ExecuteConsoleCommand(pc, text, pc)
+    except Exception as ex:  # noqa: BLE001
+        logging.dev_warning(f"[Borderlands Gamble] Couldn't run '{text}': {ex!r}")
+        return False
+    return True
+
+
 @dataclass
 class Check:
     ok: bool
@@ -108,7 +119,14 @@ class BL4Backend:
     one, which is what lets the host's casino charge and pay co-op partners.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, slot_machines: Callable[[], Iterable[tuple[float, float, float]]] | None = None
+    ) -> None:
+        """
+        Args:
+            slot_machines: Gets where the mod's own slot machines stand, which count as machines too.
+        """
+        self.slot_machines = slot_machines
         self._currency_struct: UObject | None = None
         self._experience_struct: UObject | None = None
         self._item_pool_store_ptr: WeakPointer = WeakPointer()
@@ -141,7 +159,7 @@ class BL4Backend:
             if not stores:
                 raise RuntimeError(f"Couldn't find a {ITEM_POOL_STORE_CLASS}")
             # Prefer a live instance, but the config store may only exist as its class default
-            live = [store for store in stores if not _is_template(store)]
+            live = [store for store in stores if not is_template(store)]
             store = (live or stores)[-1]
             self._item_pool_store_ptr = WeakPointer(store)
         return store
@@ -179,8 +197,13 @@ class BL4Backend:
         here = pawn.K2_GetActorLocation()
         max_dist_sq = radius * radius
 
+        if self.slot_machines is not None:
+            for x, y, z in self.slot_machines():
+                if (here.X - x) ** 2 + (here.Y - y) ** 2 + (here.Z - z) ** 2 <= max_dist_sq:
+                    return True
+
         for machine in unrealsdk.find_all(VENDING_MACHINE_CLASS, exact=False):
-            if _is_template(machine):
+            if is_template(machine):
                 continue
             try:
                 # Other mods sometimes spawn hidden machines as helpers - ignore those
@@ -274,11 +297,21 @@ class BL4Backend:
         attempt(
             "Vending machines loaded",
             lambda: sum(
-                1 for m in unrealsdk.find_all(VENDING_MACHINE_CLASS, exact=False) if not _is_template(m)
+                1 for m in unrealsdk.find_all(VENDING_MACHINE_CLASS, exact=False) if not is_template(m)
             ),
         )
-        for path in ("/Script/UMG.UserWidget", "/Script/UMG.TextBlock", "/Script/UMG.CanvasPanel"):
+        for path in (
+            "/Script/UMG.UserWidget",
+            "/Script/UMG.TextBlock",
+            "/Script/UMG.CanvasPanel",
+            "/Script/UMG.Button",
+            "/Script/Engine.StaticMeshActor",
+            "/Script/Engine.SkeletalMeshActor",
+            "/Script/Engine.TextRenderActor",
+        ):
             attempt(f"Class {path}", lambda path=path: unrealsdk.find_object("Class", path))
+        for name in ("GameplayStatics", "WidgetBlueprintLibrary", "KismetSystemLibrary"):
+            attempt(f"Library {name}", lambda name=name: unrealsdk.find_class(name).ClassDefaultObject)
         for path in ("/Script/Engine.CameraModifier:BlueprintModifyCamera", SERVER_RPC, CLIENT_RPC):
             attempt(f"Function {path}", lambda path=path: unrealsdk.find_object("Function", path))
         return checks

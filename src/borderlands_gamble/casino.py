@@ -35,7 +35,7 @@ from .slots import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from .stats import Stats
 
@@ -123,6 +123,37 @@ class Display(Protocol):
     def hide(self) -> None:
         """Hides the overlay."""
         ...
+
+
+class DisplaySwitch:
+    """
+    A display that shows on whichever of several displays is active.
+
+    E.g. the menu while it's open, and the HUD overlay otherwise. Switching moves whatever is on
+    screen, so closing the menu mid spin finishes the spin on the HUD.
+    """
+
+    def __init__(self, displays: Mapping[str, Display], active: str) -> None:
+        self.displays = dict(displays)
+        self.active = active
+        self._view: OverlayView | None = None
+
+    def render(self, view: OverlayView) -> None:
+        self._view = view
+        self.displays[self.active].render(view)
+
+    def hide(self) -> None:
+        self._view = None
+        self.displays[self.active].hide()
+
+    def switch(self, name: str) -> None:
+        if name == self.active:
+            return
+        previous = self.displays[self.active]
+        self.active = name
+        if self._view is not None:
+            previous.hide()
+            self.displays[name].render(self._view)
 
 
 # ==================================================================================================
@@ -215,7 +246,7 @@ class Casino:
         if (reason := self.backend.check_can_play(player)) is not None:
             return reason
         if rules.require_machine and not self.backend.is_near_machine(player, rules.machine_radius):
-            return "Find a vending machine to gamble at."
+            return "Find a slot machine or vending machine to gamble at."
 
         level = self.backend.player_level(player)
         if level is None:
@@ -453,6 +484,7 @@ class SlotController:
         self._spinning: _Spinning | None = None
         self._visible_until: float | None = None
         self._last_view: OverlayView | None = None
+        self.last_result: SpinResult | None = None
 
     @property
     def is_spinning(self) -> bool:
@@ -531,6 +563,22 @@ class SlotController:
             self.display.hide()
         return self.needs_tick
 
+    def notify(self, text: str, machine_key: str = "cash") -> None:
+        """Shows a message for a few seconds, e.g. why the menu can't open. Ignored mid pull."""
+        if self._waiting is None and self._spinning is None:
+            self._message(text, Tone.ERROR, self.clock(), machine_key)
+
+    def resting_view(self, machine_key: str, status: str = "") -> OverlayView:
+        """Gets how a machine looks between pulls: its reels where they last stopped."""
+        machine_key = machine_key if machine_key in MACHINES else "cash"
+        return OverlayView(
+            title=_title(machine_key),
+            reels=self._reel_views(machine_key, None, self.clock()),
+            status=status,
+            tone=Tone.INFO,
+            footer="",
+        )
+
     def shutdown(self) -> None:
         """Settles anything in progress, then hides the overlay."""
         if self._spinning is not None:
@@ -577,6 +625,7 @@ class SlotController:
             return
         self._spinning = None
         result = spinning.result
+        self.last_result = result
 
         try:
             payout = self.link.settle(spinning.request_id)

@@ -8,6 +8,7 @@ from borderlands_gamble.casino import (
     MESSAGE_SECONDS,
     SETTLE_TIMEOUT,
     Casino,
+    DisplaySwitch,
     HouseRules,
     LocalLink,
     Payout,
@@ -396,6 +397,70 @@ class ControllerTests(ControllerTestCase):
         controller.pull()
         self.assertFalse(controller.is_spinning)
         self.assertEqual(len(self.backend.spawned), 1)
+
+    def test_resting_view_and_last_result(self) -> None:
+        controller = self.make([(S.EPIC, S.CASH, S.VAULT)])
+        self.assertIsNone(controller.last_result)
+        controller.pull()
+        self.run_until_idle(controller)
+        assert controller.last_result is not None
+        self.assertEqual(controller.last_result.line, (S.EPIC, S.CASH, S.VAULT))
+
+        # Between pulls, the reels stay where they stopped
+        view = controller.resting_view("cash", "Pull the lever!")
+        self.assertEqual(tuple(reel.payline for reel in view.reels), (S.EPIC, S.CASH, S.VAULT))
+        self.assertTrue(all(reel.stopped for reel in view.reels))
+        self.assertEqual((view.title, view.status, view.tone), ("LOOT SLOTS", "Pull the lever!", Tone.INFO))
+        self.assertEqual(controller.resting_view("nope").title, "LOOT SLOTS")
+
+
+class NotifyTests(ControllerTestCase):
+    def test_notify(self) -> None:
+        controller = self.make([(S.CASH,) * 3])
+        controller.notify("Find a machine.", "eridium")
+        self.assertEqual(
+            (self.display.views[-1].status, self.display.views[-1].title),
+            ("Find a machine.", "ERIDIUM SLOTS"),
+        )
+        self.assertTrue(controller.needs_tick)
+        self.clock.now += MESSAGE_SECONDS
+        self.assertFalse(controller.tick())
+
+        # Never interrupts a pull
+        controller.pull()
+        views = len(self.display.views)
+        controller.notify("Find a machine.")
+        self.assertEqual(len(self.display.views), views)
+
+
+class DisplaySwitchTests(ControllerTestCase):
+    def test_moves_the_spin_between_displays(self) -> None:
+        controller = self.make([(S.CASH,) * 3])
+        hud, menu = FakeDisplay(), FakeDisplay()
+        switch = DisplaySwitch({"hud": hud, "menu": menu}, "menu")
+        controller.display = switch
+
+        controller.pull()
+        self.clock.now += 0.1
+        controller.tick()
+        spinning_views = len(menu.views)
+        self.assertGreater(spinning_views, 0)
+        self.assertEqual(hud.views, [])
+
+        # Closing the menu mid spin carries on on the HUD
+        switch.switch("hud")
+        self.assertEqual(menu.hidden, 1)
+        self.assertEqual(hud.views[-1], menu.views[-1])
+        self.run_until_idle(controller)
+        self.assertEqual(len(menu.views), spinning_views)
+        self.assertIn("Cash out!", hud.views[-1].status)
+        self.assertEqual(hud.hidden, 1)
+
+        # Nothing on screen, so switching back doesn't draw anything
+        switch.switch("menu")
+        switch.switch("menu")
+        self.assertEqual(len(menu.views), spinning_views)
+        self.assertEqual(hud.hidden, 1)
 
 
 class ExpectedPayoutTests(unittest.TestCase):

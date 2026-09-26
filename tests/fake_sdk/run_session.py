@@ -3,7 +3,8 @@ Plays a session of the mod inside the fake game, using the real mods_base.
 
 Builds the `.sdkmod`, drops it into a scratch `sdk_mods` folder next to a copy of mods_base, and
 imports it the same way the mod manager does. Then enables the mod, pulls the lever, drives the
-frame tick, and checks what happened to the (fake) wallet, loot, overlay and settings.
+frame tick, and checks what happened to the (fake) wallet, loot, overlay and settings. It also walks
+up to a slot machine in a safehouse, presses E, and plays through the menu.
 
 Usage: python tests/fake_sdk/run_session.py <path to a bl-sdk/mods_base checkout>
 Needs Python 3.14+, like the SDK itself.
@@ -51,6 +52,270 @@ class RiggedRandom(random.Random):
         return super().choices(population, *args, **kwargs)
 
 
+def play_in_the_world(
+    game: Any,
+    sdk_mod: Any,
+    commands: Any,
+    hooks: Any,
+    tick: Any,
+    tick_until_idle: Any,
+    statuses: Any,
+    logged: Any,
+    rng: RiggedRandom,
+    tmp: Path,
+) -> None:
+    """Walks up to a slot machine in a safehouse, and plays it through the menu."""
+    import fake_game
+
+    from borderlands_gamble.menu_model import MenuAction
+    from borderlands_gamble.slots import Symbol
+
+    pc = game.pc
+    pc.authority = True
+    machines = sdk_mod.slot_machines
+    settings_file = tmp / "sdk_mods" / "settings" / "borderlands_gamble.json"
+
+    def spots() -> list[tuple[float, ...]]:
+        return sorted(tuple(round(v, 1) + 0.0 for v in c.spot.to_json()) for c in machines.cabinets)
+
+    # ---- Slot machines go up next to the vending machines, a couple per update ----
+    tick(sdk_mod.WORLD_INTERVAL + 0.5)
+    assert spots() == [(1200.0, 2390.0, 300.0, 180.0), (29_840.0, 0.0, 0.0, 90.0)], spots()
+    for kind, per_machine in (("StaticMeshActor", 2), ("SkeletalMeshActor", 1), ("TextRenderActor", 1)):
+        actors = game.live_actors(kind)
+        assert len(actors) == 2 * per_machine, (kind, len(actors))
+    assert all(a.finished and a.replicates_at_finish is False for a in game.actors), (
+        "copies mustn't replicate"
+    )
+    body = next(a for a in game.live_actors("StaticMeshActor") if a.location == (1200.0, 2390.0, 300.0))
+    component = body.StaticMeshComponent
+    assert component.mobility == 2 and component.mesh.Name == "SM_VendingMachine_Ammo_2_Body", component.mesh
+    source = next(m for m in game.machines if m.Name == "VendingMachine_Ammo_2").components[0]
+    assert component.materials == source.materials, "materials should be copied"
+    door = next(a for a in game.live_actors("SkeletalMeshActor") if a.location[1] == 2390.0)
+    assert door.location == (1170.0, 2390.0, 360.0), door.location
+    assert door.SkeletalMeshComponent.mesh.Name == "SK_VendingMachine_Ammo_2_Door"
+    assert all(a.TextRender.text == "SLOTS" for a in game.live_actors("TextRenderActor"))
+    assert not any(
+        a.StaticMeshComponent.mesh.Name == "SM_LOD_Proxy" for a in game.live_actors("StaticMeshActor")
+    )
+
+    # ---- Aiming at one shows a prompt ----
+    pc.Pawn.location = (1000.0, 2390.0, 300.0)
+    pc.PlayerCameraManager.look_at(1200.0, 2390.0, 400.0)
+    tick(0.2)
+    # Still on Eridium Slots from earlier
+    assert "[E]  PLAY ERIDIUM SLOTS" in statuses(), statuses()[-5:]
+    prompt_root = sdk_mod.prompt._root()
+    assert prompt_root.visibility == 3
+    pc.PlayerCameraManager.look_at(1000.0, 3000.0, 400.0)
+    tick(0.2)
+    assert prompt_root.visibility == 1, "the prompt should go when you look away"
+    # E does its normal thing when you're not aiming at a slot machine
+    assert sdk_mod.use_machine_keybind.callback() is None
+    assert not sdk_mod.menu.is_open
+    # Nor when aiming at the real vending machine next to it
+    pc.PlayerCameraManager.look_at(1200.0, 2230.0, 400.0)
+    tick(0.2)
+    assert sdk_mod.use_machine_keybind.callback() is None
+    assert prompt_root.visibility == 1
+
+    # ---- Pressing E opens the menu ----
+    pc.PlayerCameraManager.look_at(1200.0, 2390.0, 400.0)
+    assert sdk_mod.use_machine_keybind.callback() is hooks.Block, "E should be kept from the game"
+    menu = sdk_mod.menu
+    assert not menu.is_open, "the menu opens on the next frame, not mid key press"
+    tick(1 / 30)
+    assert menu.is_open
+    assert pc.bShowMouseCursor is True and pc.ignore_look == 1 and pc.ignore_move == 1
+    assert "gbx.ui.view.stateadd CINEMATIC" in game.console_commands
+    mode, focus = game.input_mode
+    buttons = {button.action: button for button in menu._widgets.buttons}
+    assert mode == "GameAndUI" and focus is buttons[MenuAction.PULL].hit, game.input_mode
+    tick(0.2)
+    assert prompt_root.visibility == 1, "no prompt while the menu is open"
+    shown = statuses()
+    for text in ("ERIDIUM SLOTS", "PULL THE LEVER  (20 eridium)", "PAYTABLE  (x2 bet)", "3x VAULT", "LEAVE"):
+        assert text in shown, text
+    assert any(text.startswith("Cash $") for text in shown)
+
+    def click(action: MenuAction) -> None:
+        button = buttons[action].hit
+        button.pressed = True
+        tick(0.1)
+        button.pressed = False
+        tick(0.3)
+
+    def press(*keys: str) -> None:
+        pc.keys_down = set(keys)
+        tick(0.1)
+        pc.keys_down = set()
+        tick(0.3)
+
+    # The player left Eridium Slots at 2x earlier - switch back, and up the bet
+    click(MenuAction.MACHINE)
+    assert sdk_mod.player_settings().machine_key == "cash"
+    assert "LOOT SLOTS" in statuses()
+    click(MenuAction.BET_UP)
+    assert sdk_mod.player_settings().bet == 5
+    assert "PULL THE LEVER  ($13,000)" in statuses()
+    saved = json.loads(settings_file.read_text())
+    assert saved["options"]["Your Machine"]["bet"] == "5x", saved
+
+    # If clicks never reach the buttons, the raw mouse still works
+    x, y, w, h = buttons[MenuAction.BET_UP].rect
+    pc.mouse = (x + w / 2, y + h / 2)
+    press("LeftMouseButton")
+    assert sdk_mod.player_settings().bet == 10
+    pc.mouse = None
+    press("Down")
+    press("Down")
+    assert sdk_mod.player_settings().bet == 2
+
+    # Space pulls. Switching machine or bet mid-spin is ignored
+    rng.queue = [Symbol.CASH] * 3
+    cash_before = game.cash()
+    press("SpaceBar")
+    assert sdk_mod.controller.is_spinning
+    assert game.cash() == cash_before - 5200
+    assert "Spinning..." in statuses()
+    assert "SKIP" in statuses()
+    click(MenuAction.MACHINE)
+    assert sdk_mod.player_settings().machine_key == "cash"
+
+    # Escape leaves, on release. The spin carries on on the HUD
+    pc.keys_down = {"Escape"}
+    tick(0.1)
+    assert menu.is_open, "leaving waits for Escape to come back up"
+    pc.keys_down = set()
+    tick(0.1)
+    assert not menu.is_open
+    assert pc.bShowMouseCursor is False and pc.ignore_look == 0 and pc.ignore_move == 0
+    assert game.console_commands[-1] == "gbx.ui.view.stateremove CINEMATIC"
+    assert game.input_mode == ("GameOnly", None)
+    tick_until_idle()
+    assert game.cash() == cash_before - 5200 + 20 * 5200, game.cash()
+    assert sdk_mod.overlay._root() is not None, "the HUD should have taken over the spin"
+
+    # ---- F8 opens the menu near any machine, pulls inside it, and E leaves ----
+    sdk_mod.open_menu_keybind.callback()
+    tick(1 / 30)
+    assert menu.is_open
+    rng.queue = [Symbol.SKULL, Symbol.CASH, Symbol.EPIC]
+    tick(0.3)
+    sdk_mod.open_menu_keybind.callback()
+    tick(1 / 30)
+    assert sdk_mod.controller.is_spinning
+    tick_until_idle()
+    assert "Pull the lever!" in statuses()
+    assert sdk_mod.use_machine_keybind.callback() is hooks.Block
+    tick(1 / 30)
+    assert not menu.is_open
+    commands.run("gamble_menu")
+    assert menu.is_open
+    commands.run("gamble_menu")
+    assert not menu.is_open
+
+    # Keybinds might not fire while the menu has focus, so it watches E and F8 itself too
+    commands.run("gamble_menu")
+    rng.queue = [Symbol.SKULL, Symbol.CASH, Symbol.EPIC]
+    press("F8")
+    assert sdk_mod.controller.is_spinning
+    tick_until_idle()
+    press("E")
+    assert not menu.is_open
+
+    # A map change takes the menu's widgets - it closes, and hands control back
+    commands.run("gamble_menu")
+    game.collect_widgets()
+    tick(0.1)
+    assert not menu.is_open and pc.bShowMouseCursor is False
+    assert game.console_commands[-1] == "gbx.ui.view.stateremove CINEMATIC"
+
+    # As does respawning
+    commands.run("gamble_menu")
+    old_pawn = pc.Pawn
+    pc.Pawn = fake_game.Pawn(old_pawn.location)
+    tick(0.1)
+    assert not menu.is_open
+    pc.Pawn = old_pawn
+
+    # Far from any machine, F8 says where to go instead of opening
+    pc.Pawn.location = (9000.0, 9000.0, 300.0)
+    sdk_mod.open_menu_keybind.callback()
+    tick(1 / 30)
+    assert not menu.is_open
+    assert "Find a slot machine or vending machine to gamble at." in statuses()
+    tick_until_idle()
+
+    # ---- Placing and removing machines by hand ----
+    pc.Pawn.location = (5000.0, 2000.0, 300.0)
+    pc.Pawn.yaw = 90.0
+    commands.run("gamble_machine add")
+    assert (5000.0, 2150.0, 210.0, 270.0) in spots(), spots()
+    saved = json.loads(settings_file.read_text())
+    assert saved["options"]["placed_machines"]["added"] == {"Kairos_P": [[5000.0, 2150.0, 210.0, 270.0]]}, (
+        saved
+    )
+
+    # The host counts the mod's own slot machines, not just vending machines
+    rng.queue = [Symbol.SKULL, Symbol.SKULL, Symbol.CASH]
+    cash_before = game.cash()
+    commands.run("gamble_spin")
+    assert game.cash() == cash_before - 5200, "a slot machine should count as a machine"
+    tick_until_idle()
+
+    commands.run("gamble_machine remove")
+    assert (5000.0, 2150.0, 210.0, 270.0) not in spots()
+
+    # Removing an automatic one moves it to the other end of the row
+    pc.Pawn.location = (1100.0, 2390.0, 300.0)
+    commands.run("gamble_machine remove")
+    tick(0.1)
+    assert (1200.0, 1940.0, 300.0, 180.0) in spots(), spots()
+    commands.run("gamble_machine")
+    assert any("Your changes on this map: 0 added, 1 removed." in line for line in logged("info"))
+    commands.run("gamble_machine reset")
+    assert (1200.0, 2390.0, 300.0, 180.0) in spots(), spots()
+    before = {id(a) for a in game.live_actors()}
+    commands.run("gamble_machine refresh")
+    assert not before & {id(a) for a in game.live_actors()}, "refresh should rebuild them"
+
+    # ---- A new map ----
+    game.map_name = "Fadefields_P"
+    game.collect_actors()
+    tick(sdk_mod.WORLD_INTERVAL + 0.5)
+    assert machines.keeper.map_name == "Fadefields_P"
+    assert len(machines.cabinets) == 2
+    game.map_name = "Kairos_P"
+
+    # ---- Turning them off takes them down, and lets the tick rest ----
+    sdk_mod.show_machines_option.value = False
+    assert not game.live_actors()
+    tick(0.1)
+    assert not hooks.has_hook(TICK_FUNC, hooks.Type.POST, sdk_mod.frame_tick.hook_identifier)
+
+    # ---- Tracing function calls, to research the native use prompt ----
+    plugins = tmp / "Plugins"
+    plugins.mkdir(exist_ok=True)
+    used = (
+        "/Game/InteractiveObjects/Vending/Script_Vending.Script_Vending_C"
+        ":GbxActorScriptEvt__UsableActorState_K2_OnUsed"
+    )
+    (plugins / "unrealsdk.calls.tsv").write_text(
+        f"ProcessEvent\t{used}\tScript_Vending_C_0\n" * 3
+        + "ProcessEvent\t/Script/Engine.Actor:ReceiveTick\tActor_0\n",
+    )
+    commands.run("gamble_trace --seconds 1")
+    assert hooks.LOG_ALL_CALLS == [True]
+    tick_until_idle()
+    assert hooks.LOG_ALL_CALLS == [True, False]
+    assert any(line.endswith(f"3  {used}") for line in logged("info")), logged("info")[-5:]
+    assert not any("ReceiveTick" in line for line in logged("info"))
+
+    pc.Pawn.location = (1000.0, 2000.0, 300.0)
+
+
 def main(mods_base_dir: Path) -> None:
     tmp = Path(tempfile.mkdtemp(prefix="bl4_fake_game_"))
     sdk_mods = tmp / "sdk_mods"
@@ -81,23 +346,43 @@ def main(mods_base_dir: Path) -> None:
     mod = gamble.mod
 
     assert mod.name == "Borderlands Gamble", mod.name
-    assert mod.version == "0.2.0", mod.version
+    assert mod.version == "0.3.0", mod.version
     assert not mod.enabling_locked, "mod should be allowed to enable in BL4"
     assert ".sdkmod" in str(sdk_mod.__file__), f"should import from the .sdkmod, not {sdk_mod.__file__}"
 
     from unrealsdk.unreal import WrappedStruct
 
     from borderlands_gamble import protocol
+    from borderlands_gamble.menu_model import MenuAction
     from borderlands_gamble.slots import Symbol
+
+    def ticking() -> bool:
+        return hooks.has_hook(TICK_FUNC, hooks.Type.POST, sdk_mod.frame_tick.hook_identifier)
+
+    def busy() -> bool:
+        return (
+            sdk_mod.controller.needs_tick
+            or sdk_mod.casino.has_pending
+            or sdk_mod._ping is not None
+            or sdk_mod._trace_until is not None
+        )
+
+    def tick(seconds: float = 1 / 15) -> None:
+        """Runs the game for a while, at 30 frames a second."""
+        end = clock.now + seconds
+        while clock.now < end:
+            clock.now += 1 / 30
+            hooks.fire(TICK_FUNC)
 
     def tick_until_idle(limit: float = 30.0) -> int:
         frames = 0
         end = clock.now + limit
-        while hooks.has_hook(TICK_FUNC, hooks.Type.POST, sdk_mod.frame_tick.hook_identifier):
+        while busy():
+            assert ticking(), "the frame tick is off while something still needs it"
             clock.now += 1 / 30
             hooks.fire(TICK_FUNC)
             frames += 1
-            assert clock.now < end, "frame tick never switched itself off"
+            assert clock.now < end, "never finished"
         return frames
 
     def statuses() -> list[str]:
@@ -108,8 +393,19 @@ def main(mods_base_dir: Path) -> None:
 
     mod.enable()
     assert mod.is_enabled
-    for cmd in ("gamble_spin", "gamble_odds", "gamble_stats", "gamble_diag", "gamble_coop_test"):
+    for cmd in (
+        "gamble_spin",
+        "gamble_menu",
+        "gamble_machine",
+        "gamble_odds",
+        "gamble_stats",
+        "gamble_diag",
+        "gamble_coop_test",
+        "gamble_trace",
+    ):
         assert commands.has_command(cmd), cmd
+    # Slot machines in the world are on by default, which keeps the frame tick running
+    assert ticking()
 
     # Diagnostics should find everything in the fake game
     commands.run("gamble_diag --wallet")
@@ -147,17 +443,18 @@ def main(mods_base_dir: Path) -> None:
     assert saved["options"]["stats"]["items"] == {"legendary": 2}, saved
     assert saved["enabled"] is True
 
-    # Eridium Slots via the keybind, with a 2x bet, pulled twice to skip the animation
-    sdk_mod.switch_machine_keybind.callback()
-    sdk_mod.change_bet_keybind.callback()
+    # Eridium Slots with a 2x bet, via the menu's actions, then a quick pull pressed twice to skip
+    # the animation
+    sdk_mod.on_menu_action(MenuAction.MACHINE)
+    sdk_mod.on_menu_action(MenuAction.BET_UP)
     assert sdk_mod.player_settings().machine_key == "eridium"
     assert sdk_mod.player_settings().bet == 2
     saved = json.loads(settings_file.read_text())
     assert saved["options"]["Your Machine"]["machine"] == "Eridium Slots", saved
     rng.queue = [Symbol.ERIDIUM] * 3
     eridium_before = game.pc.CurrencyManager.row("eridium").Amount
-    sdk_mod.pull_lever_keybind.callback()
-    sdk_mod.pull_lever_keybind.callback()
+    sdk_mod.quick_pull_keybind.callback()
+    sdk_mod.quick_pull_keybind.callback()
     assert not sdk_mod.controller.is_spinning
     assert game.pc.CurrencyManager.row("eridium").Amount == eridium_before - 20 + 15 * 20
     tick_until_idle()
@@ -167,7 +464,7 @@ def main(mods_base_dir: Path) -> None:
     calls_before = len(game.give_calls)
     commands.run("gamble_spin")
     assert len(game.give_calls) == calls_before
-    assert any("Find a vending machine" in text for text in statuses())
+    assert any("Find a slot machine" in text for text in statuses())
     tick_until_idle()
     game.pc.Pawn.location = (1000.0, 2000.0, 300.0)
 
@@ -259,29 +556,45 @@ def main(mods_base_dir: Path) -> None:
     game.pc.authority = True
 
     # A map change garbage collects the overlay - the next pull should rebuild it
+    overlay_root = sdk_mod.overlay._root()
     game.collect_widgets()
     rng.queue = [Symbol.SKULL, Symbol.CASH, Symbol.EPIC]
     commands.run("gamble_spin")
     tick_until_idle()
-    user_widgets = [w for w in game.widgets if isinstance(w, fake_game.UserWidget)]
-    assert len(user_widgets) == 2, len(user_widgets)
+    assert sdk_mod.overlay._root() not in (None, overlay_root), "the overlay should have been rebuilt"
+
+    play_in_the_world(game, sdk_mod, commands, hooks, tick, tick_until_idle, statuses, logged, rng, tmp)
 
     # Disabling mid-spin still pays out, then tears everything down
+    sdk_mod.show_machines_option.value = True
+    tick(0.1)
+    assert game.live_actors(), "slot machines should be back up"
+    sdk_mod.machine_option.value = "Eridium Slots"
     rng.queue = [Symbol.RARE] * 3
     spawned_before = len(game.spawned)
+    commands.run("gamble_menu")
     commands.run("gamble_spin")
     assert sdk_mod.controller.is_spinning
+    menu_root = sdk_mod.menu._root()
+    assert menu_root.in_viewport
     mod.disable()
     # Eridium Slots pay 2 rares for three RARE symbols, doubled by the 2x bet
     assert len(game.spawned) == spawned_before + 4, game.spawned[spawned_before:]
-    assert not hooks.has_hook(TICK_FUNC, hooks.Type.POST, sdk_mod.frame_tick.hook_identifier)
+    assert not ticking()
     assert not hooks.has_hook(SERVER_RPC, hooks.Type.PRE, "borderlands_gamble.coop")
     assert not hooks.has_hook(CLIENT_RPC, hooks.Type.PRE, "borderlands_gamble.coop")
-    assert not user_widgets[-1].in_viewport
+    assert not menu_root.in_viewport
+    assert not game.live_actors(), "disabling should take every slot machine down"
+    assert game.pc.bShowMouseCursor is False and game.input_mode == ("GameOnly", None)
     assert not commands.has_command("gamble_spin")
 
-    errors = [line for line in logged("error") if "keybind" not in line.lower()]
-    assert not errors, errors
+    # The fake SDK has no keybind system, which mods_base complains about. Anything else is a bug
+    problems = [
+        f"{level}: {line}"
+        for level, line in logging.LINES
+        if level != "info" and "keybind" not in line.lower()
+    ]
+    assert not problems, problems
 
     print(f"Session OK: {len(game.give_calls)} currency changes, {len(game.spawned)} items dropped")
 

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from .machines import BET_MULTIPLIERS, MACHINES
 from .slots import Line, SpinResult, Symbol, scale_prize
 
-MOD_VERSION = "0.2.0"
+MOD_VERSION = "0.3.0"
 
 PREFIX = "BLGMB"
 PROTOCOL = 1
