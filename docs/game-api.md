@@ -1,9 +1,12 @@
 # Game APIs the mod relies on
 
-Everything game specific lives in [`bl4.py`](../src/borderlands_gamble/bl4.py) (game state) and
-[`overlay.py`](../src/borderlands_gamble/overlay.py) (drawing). Each API below comes from a
-published BL4 SDK mod that already uses it. `gamble_diag` checks all of them. When a check fails
-after a game patch, paste the matching snippet into the console (open it with `~`) to dig in.
+Everything game specific lives in [`bl4.py`](../src/borderlands_gamble/bl4.py) (game state),
+[`world.py`](../src/borderlands_gamble/world.py) (slot machines in the world),
+[`overlay.py`](../src/borderlands_gamble/overlay.py) (HUD) and
+[`menu.py`](../src/borderlands_gamble/menu.py) (the menu). Each API below comes from a published BL4
+SDK mod that already uses it, or is a standard Unreal Engine function. `gamble_diag` checks the core
+ones. When a check fails after a game patch, paste the matching snippet into the console (open it
+with `~`) to dig in.
 
 The snippets assume you've run this first:
 
@@ -19,7 +22,8 @@ py pc = get_pc()
 |---|---|---|
 | Balances | `pc.CurrencyManager.currencies`: rows with `.type` (an `FGbxDefPtr`) and `.Amount` | [MSBT](https://github.com/funkyoushift/MattsSDKBoostingTools) `player_readback.py`, [TrashSeller](https://github.com/FreepDryer/freepdryer-bl4-sdk-mods) |
 | Currency tokens | `Cash`, `eridium`, `VaultCard01_Tokens` … `VaultCard05_Tokens` | MSBT `player_economy.py` |
-| Grant / charge | `GbxCurrencyFunctionLibrary` CDO `.GiveCurrency(pc, FGbxDefPtr(token, <GbxCurrencyDef struct>), amount)` | MSBT `player_economy.py` |
+| Grant | `GbxCurrencyFunctionLibrary` CDO `.GiveCurrency(pc, FGbxDefPtr(token, <GbxCurrencyDef struct>), amount)` | MSBT `player_economy.py` |
+| Charge | A negative `GiveCurrency` if the game takes it, otherwise writing the row's `Amount` | See below |
 
 ```
 py print([(r.type._name, r.Amount) for r in pc.CurrencyManager.currencies])
@@ -29,11 +33,28 @@ py cash = FGbxDefPtr("Cash", unrealsdk.find_object("ScriptStruct", "/Script/GbxG
 py lib.GiveCurrency(pc, cash, 100)
 ```
 
-**Assumption to verify:** charging a pull passes a *negative* amount to `GiveCurrency`. MSBT's
-`givecurrency` command accepts negative amounts, but no mod we know of relies on them. The mod checks
-the balance after every charge, and voids the spin if the money didn't actually leave the wallet. So
-the worst case is "can't charge", never a free win or a lost stake. `gamble_diag --wallet` tests it
-directly by taking $1 and giving it back. If it fails, **Free Play** still works.
+**Charging.** `GiveCurrency` is proven for giving, and the mod's payouts use it. Taking is less
+certain: MSBT's `givecurrency` command accepts negative amounts, but no mod we know of relies on them,
+and in the first in-game test, paid pulls failed while free ones worked. So the first charge of each
+currency in a session starts by giving -1:
+
+- If the wallet drops by 1, the game takes negative amounts, and the rest of the charge goes the same
+  way.
+- If not, the mod writes the wallet row's `Amount` directly. The SDK reads a struct as a view of the
+  game's memory, not a copy, so the write changes the real wallet. It writes 1 short, then gives the
+  1 with `GiveCurrency`, so the game announces the new amount the usual way (the HUD updates, and in
+  co-op the partner's game hears about it).
+
+The console says which it picked, e.g. `Charging Cash by writing the wallet.` Either way, the mod
+checks the balance after every charge, and voids the spin if the money didn't actually leave the
+wallet. So the worst case is "can't charge", never a free win or a lost stake. `gamble_diag --wallet`
+runs the same test by taking $1 and giving it back. If it fails, **Free Play** still works.
+
+```
+py row = [r for r in pc.CurrencyManager.currencies if r.type._name == "Cash"][0]
+py row.Amount = row.Amount - 101
+py lib.GiveCurrency(pc, cash, 1)
+```
 
 ## Player
 
@@ -42,7 +63,12 @@ directly by taking $1 and giving it back. If it fails, **Free Play** still works
 | Player controller | `mods_base.get_pc()` | mods_base |
 | Host check | `pc.HasAuthority()` | MSBT `party_helpers.py` |
 | Level | `pc.PlayerState.BP_GetExperienceLevel(FGbxDefPtr("Character", <GbxExperienceDef struct>))` | MSBT `player_readback.py` |
-| Position / facing | `pc.Pawn.K2_GetActorLocation()`, `.K2_GetActorRotation()`, `.K2_GetActorTransform()` | Unreal built-ins, used throughout MSBT |
+| Position / facing | `pc.Pawn.K2_GetActorLocation()`, `.K2_GetActorRotation()` | Unreal built-ins, used throughout MSBT |
+
+Careful with Unreal's Blueprint names: the "Get Actor Transform" node is the function `GetTransform`.
+There's no `K2_GetActorTransform`, and calling it fails with an `AttributeError`. The fake game's
+player controller, character, and player state are checked against `dir()` dumps of the real ones
+(`tests/fake_sdk/bl4_names.json`), so the tests catch this kind of mistake.
 
 ```
 py from unrealsdk.unreal import FGbxDefPtr
@@ -55,15 +81,25 @@ py print(pc.PlayerState.BP_GetExperienceLevel(xp), pc.HasAuthority())
 | What | API | Proven by |
 |---|---|---|
 | Spawn an item | `NexusConfigStoreItemPool.SpawnInventoryFromItemPool(world, transform, level, pool_name)` | MSBT `shinies.py`, `item_pool_spawning.py` |
+| Transform | `make_struct("Transform", Rotation=<Quat>, Translation=<Vector>, Scale3D=<Vector>)` | MSBT `asd_hybrid.py`, this mod's slot machines |
 | World | `ENGINE.GameViewport.World` | MSBT, [EncoreTweaks](https://github.com/RedxYeti/yeti-bl4-sdk) |
 | Pool names | e.g. `itempool_guns_03_rare`, `itempool_sr_05_legendary`, from the game's own data (v1.10 / build 25234898) | MSBT's `item_pools.json` catalog |
 
-The prize pools per tier are in [`loot.py`](../src/borderlands_gamble/loot.py). There's no combined
-legendary gun pool, so legendaries roll a weapon type first.
+The prize pools per tier, and per **Drops** choice, are in
+[`loot.py`](../src/borderlands_gamble/loot.py). There's no combined legendary gun pool, so
+legendaries roll a weapon type first. Each weapon type, shields, grenades (`grenade_gadgets`),
+repkits, class mods, and enhancements all have their own rare, epic, and legendary pools.
+
+At one of the mod's slot machines, loot lands on the floor in front of it, on the side facing the
+player. Anywhere else, it lands in front of the player.
+
+**To check in co-op:** BL4's own loot is per player, so each player normally only sees their own
+drops. These are spawned by the host straight from the item pools, with no player attached, so both
+players should see them. That hasn't been tested yet.
 
 ```
 py store = list(unrealsdk.find_all("NexusConfigStoreItemPool", False))[-1]
-py t = pc.Pawn.K2_GetActorTransform()
+py t = pc.Pawn.GetTransform()
 py store.SpawnInventoryFromItemPool(ENGINE.GameViewport.World, t, 50, "itempool_guns_03_rare")
 ```
 
@@ -72,10 +108,48 @@ py store.SpawnInventoryFromItemPool(ENGINE.GameViewport.World, t, 50, "itempool_
 | What | API | Proven by |
 |---|---|---|
 | Find machines | `unrealsdk.find_all("OakVendingMachine", False)`, skipping `Default__` templates and hidden (`bHidden`) helper machines | [GroundLootHelpers](https://github.com/RedxYeti/yeti-bl4-sdk), TrashSeller |
+| Where, and how big | `K2_GetActorLocation()`, `K2_GetActorRotation()`, and `GetActorBounds(False, IGNORE_STRUCT, IGNORE_STRUCT, False)`, which returns `(…, origin, extent)` | Unreal built-ins |
 
 ```
 py print([(m.Name, m.bHidden) for m in unrealsdk.find_all("OakVendingMachine", False)])
 ```
+
+"Only at machines" counts both vending machines and the mod's own slot machines.
+
+## Slot machines in the world
+
+Each slot machine is a look-alike of the vending machine at the end of a row: new, plain actors given
+the same meshes and materials. [`cabinets.py`](../src/borderlands_gamble/cabinets.py) works out where
+they go, and `world.py` builds them. The spawning pattern is the one Matt's ActorScriptDeployer (ASD,
+MIT, in [MSBT](https://github.com/funkyoushift/MattsSDKBoostingTools)'s `tools/third_party`) uses
+for its visual copies of game actors.
+
+| What | API | Proven by |
+|---|---|---|
+| A machine's parts | `K2_GetComponentsByClass(<class>)` for `/Script/Engine.StaticMeshComponent` and `/Script/Engine.SkeletalMeshComponent`. For each: `GetStaticMesh()` or `GetSkeletalMeshAsset()`, `K2_GetComponentLocation/Rotation/Scale()`, `GetNumMaterials()`, `GetMaterial(i)` | ASD `_actor_mesh`, Unreal built-ins |
+| Spawn a plain actor | `GameplayStatics.BeginDeferredActorSpawnFromClass(world, cls, transform, 1, None, 1)`, then `FinishSpawningActor(actor, transform, 1)`. `SetReplicates(False)` in between, since every player's game builds its own copy | ASD `_spawn_actor_deferred` |
+| Give it a mesh | `StaticMeshActor`: `StaticMeshComponent.SetMobility(2)` (movable), then `SetStaticMesh(mesh)`. `SkeletalMeshActor`: `SkeletalMeshComponent.SetSkeletalMeshAsset(mesh)`. Then `SetMaterial(i, material)` for each slot | ASD `_spawn_generic_skeletal_duplicate` |
+| The SLOTS sign | `/Script/Engine.TextRenderActor`, its `TextRender` component's `K2_SetText`, `SetTextRenderColor`, `SetWorldSize` | Unreal built-in |
+| No collision | `SetActorEnableCollision(False)` on each part, as ASD's visual copies do. The host's game decides where everyone can walk, so solid copies could block a partner who doesn't have the same machine | ASD `_freeze_visual_actor` |
+| Take one down | `K2_DestroyActor()` | ASD |
+| Which map | `GameplayStatics.GetCurrentLevelName(world, True)`, to store hand placed machines against | Unreal built-in |
+| What you're aiming at | `pc.PlayerCameraManager.GetCameraLocation()` and `GetCameraRotation()`, tested against each machine's rough shape (an upright cylinder) | Unreal built-ins |
+| Walls in the way | `KismetSystemLibrary.LineTraceSingle(world, start, end, 0, False, [pawn], 0, IGNORE_STRUCT, True, IGNORE_STRUCT, IGNORE_STRUCT, 0.0)` on the visibility channel, from half a metre past the camera to just short of the machine. If it can't run, the prompt still works, through walls | Unreal built-in |
+
+```
+py m = [m for m in unrealsdk.find_all("OakVendingMachine", False) if not str(m.Name).startswith("Default__")][0]
+py from unrealsdk.unreal import IGNORE_STRUCT
+py print(m.GetActorBounds(False, IGNORE_STRUCT, IGNORE_STRUCT, False))
+py print(list(m.K2_GetComponentsByClass(unrealsdk.find_object("Class", "/Script/Engine.StaticMeshComponent"))))
+```
+
+**To check in game:**
+- That vending machines are drawn with ordinary static or skeletal mesh components. If not, the copy
+  comes out empty, and the log says `Found no meshes to copy`.
+- That the engine's default 3D text material is in the game's files. If not, the sign just doesn't
+  show. Turn off **Slot Machine Signs** if it looks wrong.
+- Which way the copies face. They copy each part's own rotation, so they should match the vending
+  machine next to them.
 
 ## Drawing and animating
 
@@ -83,23 +157,91 @@ py print([(m.Name, m.bHidden) for m in unrealsdk.find_all("OakVendingMachine", F
 |---|---|---|
 | Overlay | `construct_object("/Script/UMG.UserWidget", pc)`, then a `WidgetTree` with a `CanvasPanel` root holding `Border`/`TextBlock` children. `AddToViewport`, `SetVisibility(3)` (hit-test invisible, so no input is stolen) | MSBT `quick_menu.py` toast overlay |
 | Screen size | `WidgetLayoutLibrary.GetViewportSize(pc)` / `GetViewportScale(pc)` | MSBT `quick_menu.py` |
-| Per-frame tick | Post-hook on `/Script/Engine.CameraModifier:BlueprintModifyCamera`. It fires several times a frame, so the mod throttles to 60 Hz and only hooks it while the overlay is up | MSBT `camera_tick.py` |
+| Per-frame tick | Post-hook on `/Script/Engine.CameraModifier:BlueprintModifyCamera`. It fires several times a frame, so the mod throttles to 60 Hz. It runs while slot machines are shown in the world (they're checked every 5 s, and what you aim at 10 times a second), and otherwise only while something is on screen | MSBT `camera_tick.py` |
+
+## The menu
+
+The menu is built like the overlay, then made clickable the way
+[Matt's BL4 Mods Menu](https://github.com/mattmab/MattsBL4ModsMenu) does it.
+
+| What | API | Proven by |
+|---|---|---|
+| Buttons | `/Script/UMG.Button` at 3% opacity over our own `Border`, with the label on top. Clicks are read by polling `IsPressed()`: pressed, then released, is a click. `IsHovered()` for highlighting | Matt's BL4 Mods Menu |
+| Fallback clicks | `pc.GetMousePosition(0.0, 0.0)` and `pc.IsInputKeyDown(<LeftMouseButton>)`, against each button's rectangle in screen pixels | Matt's BL4 Mods Menu |
+| Keys | `pc.IsInputKeyDown(unrealsdk.make_struct("Key", KeyName="SpaceBar"))`, polled every frame, since keybinds can't be relied on while a menu has focus. Esc acts when released, so the pause menu doesn't also catch it | Matt's BL4 Mods Menu |
+| Cursor and focus | `pc.bShowMouseCursor = True`, `WidgetBlueprintLibrary.SetInputMode_GameAndUIEx(pc, button, 0, False, False)`. `SetInputMode_GameOnly(pc, True)` undoes it | Matt's BL4 Mods Menu |
+| Stop the player moving | `pc.SetIgnoreMoveInput(True)`, `SetIgnoreLookInput(True)`, `pc.bBlockInput = True`. `ResetIgnoreMoveInput()` and `ResetIgnoreLookInput()` undo it | Matt's BL4 Mods Menu |
+| Hide the HUD | The console command `gbx.ui.view.stateadd CINEMATIC` (`stateremove` to undo), run with `KismetSystemLibrary.ExecuteConsoleCommand(pc, command, pc)` | Matt's BL4 Mods Menu |
+| Keep focus on PULL | Every other button gets `IsFocusable = False` before it's added, and PULL is re-focused after each click. Slate presses the focused button on Space, Enter, or A | Unreal built-in (`UButton::IsFocusable`, only read when the button is built) |
+
+After a map change, or quitting to the title screen, the widgets and the controller the menu changed
+are gone. The menu then only undoes the `CINEMATIC` UI state, and never touches the old widgets or
+the new controller's input.
+
+If the menu ever gets stuck open, `gamble_menu` in the console closes it and gives back control.
 
 ## Co-op
 
 | What | API | Proven by |
 |---|---|---|
-| Client → host message | `pc.ServerExec(text)`: a reliable server RPC on every Unreal `PlayerController`. Its normal job is a dev console, which shipping builds skip | Part of Unreal Engine. BL4 mods call it too (world travel, MSBT `travel.py`) |
+| Client → host message | `pc.ServerExecRPC(text)`: a reliable server RPC on every Unreal `PlayerController`, up to 128 characters (the host kicks a client that sends more) | Part of Unreal Engine |
 | Host → client message | `pc.ClientMessage(text, "None", 0.0)`: a reliable client RPC on every `PlayerController` | Part of Unreal Engine |
-| Receiving | Pre-hooks on `/Script/Engine.PlayerController:ServerExec` and `:ClientMessage`. unrealsdk hooks `ProcessEvent`, which is how incoming RPCs get dispatched. Our messages start with `BLGMB\|` and are blocked after handling; anything else passes through untouched | unrealsdk's BL4 `ProcessEvent` hook |
+| Receiving | Pre-hooks on `/Script/Engine.PlayerController:ServerExecRPC` and `:ClientMessage`. unrealsdk hooks `ProcessEvent`, which is how incoming RPCs get dispatched. Our messages start with `BLGMB\|` and are blocked after handling; anything else passes through untouched | unrealsdk's BL4 `ProcessEvent` hook |
 | Acting for a partner | On the host, the hook's `obj` is the sending player's controller, and wallet, level, and loot calls take it directly | MSBT's host-side `givecurrency` for other players |
 
+Not `ServerExec`. Up to 0.4.2 the mod sent with it, and in the first real co-op test the client's
+pulls never reached the host. In Unreal Engine 5, `ServerExec` isn't the network call any more: it's
+a console command that calls `ServerExecRPC`, and shipping builds compile its body out. Both show up
+in a `dir()` of BL4's player controller. The fake game's `ServerExec` now does nothing, like the real
+one, so the tests catch this.
+
 Outgoing calls are wrapped in `unrealsdk.hooks.prevent_hooking_direct_calls()`, so our own hooks
-don't see them. `gamble_coop_test` checks the whole round trip in a real session. See
-[coop.md](coop.md).
+don't see them. `gamble_coop_test` checks the whole round trip in a real session, and the host's
+console logs each test it answers. See [coop.md](coop.md).
+
+## Watching other players
+
+| What | API | Proven by |
+|---|---|---|
+| Everyone in the session | `ENGINE.GameViewport.World.GameState.PlayerArray`: player states, with `GetPlayerName()` and `PawnPrivate` (their character) | [EncoreTweaks](https://github.com/RedxYeti/yeti-bl4-sdk) |
+| Who's who | `GetPlayerId()` (or the `PlayerId` property) on a player state. Every game in the session agrees on it, so it's what `show` messages carry | Unreal built-in |
+| A partner's controller, on the host | `GetPlayerController()` on their player state, or `PawnPrivate.Owner` | Unreal built-in, EncoreTweaks |
+| Where their head is on screen | `pc.ProjectWorldLocationToScreen(location, IGNORE_STRUCT, False)`, which returns `(on screen, point in pixels)` | Unreal built-in |
+
+```
+py print([(p.GetPlayerId(), p.GetPlayerName()) for p in ENGINE.GameViewport.World.GameState.PlayerArray])
+```
 
 ## Keys
 
-The lever defaults to **F8**, which the other mods we checked don't use (MSBT uses F7, F10, and F11).
-Rebind it in the mods menu if it clashes with anything. If keybinds ever stop working after a patch,
-the `gamble_spin` console command does the same thing.
+The menu opens with **F8** next to any machine (MSBT uses F7, F10, and F11, and no other mod we
+checked uses F8), and with **E** while you aim at one of the mod's slot machines. The SDK's keybinds
+hook the game's own input handling (`UGbxEnhancedPlayerInput::InputKey`), and a keybind can return
+`Block` to keep a key press from the game. The mod only does that for E, and only while you're aiming
+at one of its slot machines, which the game has nothing to use on anyway. Anywhere else, E goes
+straight to the game.
+
+The SDK skips keybinds entirely while the mouse cursor is showing (it checks the controller's
+`bShowMouseCursor`), which it always is in the menu. So the menu polls its keys, F8 and E included,
+and can't keep them from the game. That's why it only uses keys that don't do anything harmful in
+game, and why E only closes a menu that E opened. Rebind either key in the mods menu if it clashes
+with anything. If keybinds ever stop working after a patch, the `gamble_menu` and `gamble_spin`
+console commands do the same things.
+
+## Research: the game's own use prompt
+
+The mod shows its own "[E] Play" prompt because its slot machines aren't the game's interactive
+objects. To use the game's prompt instead, the next step is spawning a real interactive object and
+turning its "used" event into opening the menu. [EncoreTweaks](https://github.com/RedxYeti/yeti-bl4-sdk)
+does this for the Big Encore Machine by hooking
+`/Game/InteractiveObjects/GameSystemMachines/BossReplay/Script_BossReplay.Script_BossReplay_C:GbxActorScriptEvt__UsableActorState_K2_OnUsed`.
+The equivalent names for vending machines only show up in game:
+
+1. Stand next to a vending machine and run `gamble_trace`.
+2. Within 6 seconds, use the vending machine (open it, then close it).
+3. The mod turns on the SDK's call logger (`unrealsdk.hooks.log_all_calls`) for those seconds. It
+   writes every function call to `OakGame/Binaries/Win64/Plugins/unrealsdk.calls.tsv`, then prints
+   the ones that look use-related (names containing Usable, Interact, Vending, Shop, and so on).
+4. Paste what it prints into an issue.
+
+The game may stutter briefly while it records.

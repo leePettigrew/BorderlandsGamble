@@ -1,62 +1,97 @@
 # Co-op
 
-Both players install the same version of the mod. The **host is the bank**: every pull, whoever
-makes it, is checked, charged, rolled and paid out by the host's game. That's the only place allowed
-to change wallets and spawn loot. Each player still gets their own machine on their own screen.
+Both players install the same version of the mod, and **gamble separately**: each has their own
+menu, machine, bet and drops choice, pays from their own wallet, and wins for themselves. You can
+both play the same slot machine at once.
+
+Behind the scenes, the **host is the bank**. BL4 only lets the host's game change anyone's money or
+create items, so every pull, whoever makes it, is checked, charged, and rolled by the host's game.
+It also *pays out*: when the reels stop, it adds the winnings to the winner's wallet and drops any
+loot on the floor in front of their slot machine.
 
 ## How a pull works
 
 ```
- Client (your friend)                          Host (you)
- ─────────────────────                         ─────────────────────────────
- press F8
-   └─ "pull #1, cash, 1x" ── ServerExec ──▶    check they're near a vending machine
-                                               charge THEIR wallet, roll the reels
+ Client (your friend)                                     Host (you)
+ ─────────────────────                                    ─────────────────────────────
+ pull the lever
+   └─ "pull #1, cash, shotguns, 1x" ─ ServerExecRPC ─▶    check they're near a machine
+                                                          charge THEIR wallet, roll the reels
+                                                          show everyone else the spin
       reels spin with the host's result ◀── ClientMessage ── "result #1, VAULT VAULT VAULT"
    reels stop
-   └─ "settle #1" ─────────── ServerExec ──▶   pay THEIR wallet, drop loot at THEIR feet
+   └─ "settle #1" ──────────────────── ServerExecRPC ─▶   pay THEIR wallet, drop loot
+                                                          in front of their machine
 ```
 
-- **Messages** are short strings like `BLGMB|1|pull|1|cash|1|0.2.0`
+- **Messages** are short strings like `BLGMB|1|pull|1|cash.shotguns|1|0.5.0`
   ([`protocol.py`](../src/borderlands_gamble/protocol.py)). They ride on two network calls that
-  every Unreal Engine player controller has: `ServerExec` (client → host; its normal job is a dev
-  console, which shipping builds don't use) and `ClientMessage` (host → client). The mod catches
-  its own messages on arrival and blocks them, so the game never acts on them
+  every Unreal Engine player controller has: `ServerExecRPC` (client → host; its normal job is
+  dev-build console commands) and `ClientMessage` (host → client). The mod catches its own messages
+  on arrival and blocks them, so the game never acts on them
   ([`bl4.CoopChannel`](../src/borderlands_gamble/bl4.py)).
 - **The payout waits for the client's reels**, so loot doesn't pop out before the jackpot shows. If
   the client never confirms (crash, disconnect), the host pays out anyway after 15 seconds.
-- **The host's house rules apply to everyone**: luck, price multiplier, "only at vending machines",
-  free play, and loot level. Each player picks their own machine, bet, animation speed, and overlay
-  layout.
+- **Everyone watches everyone.** Whenever anyone pulls, the host sends everyone else a `show` message
+  with the line of symbols. Their games spin a small copy of the reels above that player's head, then
+  show what they won for a few seconds. If that player is off screen or far away, it shows in the top
+  left corner instead. Turn it off with **Show Others' Spins**.
+- **Everyone keeps the same leaderboard.** Once a pull pays out, the host sends everyone a `record`
+  message: who pulled, what it cost, what it actually paid, and what dropped (the rarity and kind of
+  each item, e.g. a legendary shotgun). Each game adds it to its own leaderboard, saved with its
+  settings, so yours covers every session you were in, whoever hosted.
+- **The host's house rules apply to everyone**: luck, price multiplier, "only at machines", free
+  play, and loot level. Each player picks their own machine, bet, animation speed, and menu size. A
+  client's menu learns the host's price from its first pull.
+- **Each player's game puts up its own slot machines** in the world. They aren't networked, but
+  every game places them the same way, so you both see one at the same end of the same row. They have
+  no collision, so machines only one of you has can't turn into invisible walls.
+- **Changes made with `gamble_machine` are just for you.** Automatic machines stand next to vending
+  machines, so the host's "only at machines" check passes for either of you there. A machine a client
+  adds somewhere else only exists in the client's game, so the host refuses pulls there, unless the
+  client is also near a vending machine or one of the host's machines, or the host turns off **Only
+  At Machines**.
+- **Loot drops for both of you to see, we think.** BL4's own loot is per player: normally each of
+  you gets your own drops, and can't see the other's. The mod's drops are made a different way: the
+  host's game spawns them straight from the item pools, the way other mods spawn items, with no
+  player attached. We expect both of you to see them, but it's the first thing to check together.
 - **Versions must match.** Results only carry the symbols, and each game works out the prize from its
   own paytable, so the host refuses clients on a different version (with a message saying so).
 - **Stats are per player**, kept in each player's own settings file.
 
 ## Testing it together
 
-1. Both install the same build. The version shows next to the mod in the `mods` menu (**0.2.0**).
+1. Both install the same build. The version shows next to the mod in the `mods` menu (**0.5.0**).
 2. Host starts the game; friend joins.
 3. **Friend** runs `gamble_coop_test` in the console. Expected:
-   `Co-op test: the host answered in 45 ms, running v0.2.0` then `all good, pull away!`
-4. Host pulls (F8 near a vending machine). This checks the host path.
-5. Friend pulls. Check, in order:
+   `Co-op test: the host answered in 45 ms, running v0.5.0` then `all good, pull away!`
+4. Host walks up to the slot machine in a safehouse, presses E, and pulls. This checks the host
+   path. The friend should see the host's reels spinning above the host's head.
+5. Friend does the same, at the same slot machine. Check, in order:
    - Friend sees "Pulling the lever...", then the reels spin.
    - Friend's cash drops by the pull price right away.
-   - When the reels stop, the friend's winnings arrive and loot drops in front of the **friend**.
+   - When the reels stop, the friend's winnings arrive, and any loot drops in front of the machine.
    - Host's wallet doesn't change.
-6. Friend walks away from the machines and pulls: they should get "Find a vending machine to gamble
-   at."
+   - Host sees the friend's reels above the friend's head, then what they won.
+   - **Both** of you can see (and either can pick up) the loot. If only the winner can, tell us.
+6. Friend walks away from the machines and pulls: they should get "Find a slot machine or vending
+   machine to gamble at."
 
 If step 3 says **no answer from the host**:
 - Check the host has the mod enabled (`mods` in console) and that versions match.
-- Run `gamble_diag` on both sides. The `Function /Script/Engine.PlayerController:ServerExec` and
-  `...:ClientMessage` lines must be `[OK]`.
-- If both pass but there's still no answer, BL4 is dropping one of those calls. Tell us, and we'll
-  move the messages to a different network call. Everything else in co-op stays the same.
+- Run `gamble_diag` on both sides. The `Function /Script/Engine.PlayerController:ServerExecRPC`
+  and `...:ClientMessage` lines must be `[OK]`.
+- Did the test reach the host? The host's console says `<name> ran the co-op test. Answering.` If
+  it does, the answer is what's lost on the way back. If it doesn't, the question never arrived.
+- Versions up to 0.4.2 sent with `ServerExec`, which never leaves the client in BL4 (see
+  [game-api.md](game-api.md#co-op)), so they always get no answer.
 
 ## What's verified and what isn't
 
 The co-op logic runs in the automated tests: a simulated host and client pass real protocol messages
-back and forth, and the full mod plays co-op sessions in a fake game. Nobody has run it in two real
-copies of BL4 yet. The one real unknown is whether `ServerExec`/`ClientMessage` get through in BL4's
-networking, which is exactly what `gamble_coop_test` checks.
+back and forth, and the full mod plays co-op sessions in a fake game.
+
+In two real copies of BL4, the first co-op test, on 0.4.0, found pulls never reached the host,
+because they went through `ServerExec`. With `ServerExecRPC` in 0.4.3, co-op pulls work. The
+leaderboard's `record` messages are new in 0.5.0, and haven't been tried in a real co-op game yet.
+They travel the same way as the results, over `ClientMessage`.

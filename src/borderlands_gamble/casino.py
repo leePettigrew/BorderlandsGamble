@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from . import loot, protocol
 from .animation import SpinAnimation, display_strip, plan_spin
+from .loot import DEFAULT_LOOT_TYPE, LOOT_TYPES
 from .machines import BET_MULTIPLIERS, MACHINES, spin_cost
 from .slots import (
     SYMBOL_LABELS,
@@ -35,7 +36,7 @@ from .slots import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from .stats import Stats
 
@@ -107,7 +108,11 @@ class Backend(Protocol):
         ...
 
     def add_currency(self, player: Any, currency: Currency, amount: int) -> None:
-        """Adds (or with a negative amount, removes) currency. Raises on failure."""
+        """Gives a player currency. Raises on failure."""
+        ...
+
+    def take_currency(self, player: Any, currency: Currency, amount: int) -> None:
+        """Takes currency from a player, who has at least that much. Raises on failure."""
         ...
 
     def spawn_item(self, player: Any, pool: str, level: int, index: int, count: int) -> None:
@@ -123,6 +128,37 @@ class Display(Protocol):
     def hide(self) -> None:
         """Hides the overlay."""
         ...
+
+
+class DisplaySwitch:
+    """
+    A display that shows on whichever of several displays is active.
+
+    E.g. the menu while it's open, and the HUD overlay otherwise. Switching moves whatever is on
+    screen, so closing the menu mid spin finishes the spin on the HUD.
+    """
+
+    def __init__(self, displays: Mapping[str, Display], active: str) -> None:
+        self.displays = dict(displays)
+        self.active = active
+        self._view: OverlayView | None = None
+
+    def render(self, view: OverlayView) -> None:
+        self._view = view
+        self.displays[self.active].render(view)
+
+    def hide(self) -> None:
+        self._view = None
+        self.displays[self.active].hide()
+
+    def switch(self, name: str) -> None:
+        if name == self.active:
+            return
+        previous = self.displays[self.active]
+        self.active = name
+        if self._view is not None:
+            previous.hide()
+            self.displays[name].render(self._view)
 
 
 # ==================================================================================================
@@ -149,6 +185,8 @@ class Payout:
     eridium: int = 0
     items: tuple[Tier, ...] = ()
     errors: tuple[str, ...] = ()
+    # The item pool each of `items` dropped from, in the same order
+    pools: tuple[str, ...] = ()
 
 
 # Either (the spin, how much was charged for it), or why the pull was refused
@@ -161,6 +199,8 @@ class _PendingPayout:
     request_id: int
     result: SpinResult
     loot_level: int
+    loot_type: str
+    charged: int
     deadline: float
 
 
@@ -173,19 +213,42 @@ class Casino:
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] = print,
+        on_spin: Callable[[Any, SpinResult, str], None] | None = None,
+        on_settled: Callable[[Any, SpinResult, int, Payout], None] | None = None,
     ) -> None:
+        """
+        Args:
+            backend: The game.
+            rules: Gets the current house rules.
+            rng: The random number generator to roll with.
+            clock: Gets the current time, in seconds.
+            log: Where to report what happens.
+            on_spin: Called with (player, spin, loot type) for every pull that goes through, e.g.
+                     to let the other players watch.
+            on_settled: Called with (player, spin, amount charged, payout) once each pull has paid
+                        out, e.g. for the leaderboard.
+        """
         self.backend = backend
         self.rules = rules
         self.rng = rng if rng is not None else random.Random()
         self.clock = clock
         self.log = log
+        self.on_spin = on_spin
+        self.on_settled = on_settled
         self._pending: dict[str, _PendingPayout] = {}
 
     @property
     def has_pending(self) -> bool:
         return bool(self._pending)
 
-    def pull(self, player: Any, request_id: int, machine_key: str, bet: int) -> Reply:
+    def pull(
+        self,
+        player: Any,
+        request_id: int,
+        machine_key: str,
+        bet: int,
+        loot_type: str = DEFAULT_LOOT_TYPE,
+    ) -> Reply:
         """
         Handles a player pulling the lever: checks, charges, and rolls the spin.
 
@@ -196,6 +259,7 @@ class Casino:
             request_id: The player's id for this pull, echoed back by `settle`.
             machine_key: Which machine they're playing.
             bet: Their bet multiplier.
+            loot_type: What any loot won should be, which also changes the price.
         Returns:
             The spin and how much was charged, or why the pull was refused.
         """
@@ -209,26 +273,28 @@ class Casino:
             return f"Unknown machine '{machine_key}'."
         if bet not in BET_MULTIPLIERS:
             return f"Unsupported bet {bet}x."
+        if loot_type not in LOOT_TYPES:
+            return f"Unknown drop type '{loot_type}'."
         rules = self.rules()
         machine = base_machine.with_luck(rules.luck)
 
         if (reason := self.backend.check_can_play(player)) is not None:
             return reason
         if rules.require_machine and not self.backend.is_near_machine(player, rules.machine_radius):
-            return "Find a vending machine to gamble at."
+            return "Find a slot machine or vending machine to gamble at."
 
         level = self.backend.player_level(player)
         if level is None:
             self.log("Couldn't read the player's level, pricing as level 1.")
             level = 1
-        stake = spin_cost(machine, level, bet=bet, cost_multiplier=rules.cost_multiplier)
+        price = rules.cost_multiplier * LOOT_TYPES[loot_type].price
+        stake = spin_cost(machine, level, bet=bet, cost_multiplier=price)
 
         charged = 0
         if not rules.free_play:
-            charged_or_error = self._charge(player, machine.currency, stake)
-            if isinstance(charged_or_error, str):
-                return charged_or_error
-            charged = charged_or_error
+            if (error := self._charge(player, machine.currency, stake)) is not None:
+                return error
+            charged = stake
 
         result = spin(machine, self.rng, stake=stake, bet=bet)
         self._pending[key] = _PendingPayout(
@@ -236,6 +302,8 @@ class Casino:
             request_id=request_id,
             result=result,
             loot_level=rules.loot_level if rules.loot_level > 0 else level,
+            loot_type=loot_type,
+            charged=charged,
             deadline=self.clock() + SETTLE_TIMEOUT,
         )
         # Don't log the line yet, the console shouldn't spoil the spin
@@ -243,6 +311,11 @@ class Casino:
             f"{self.backend.player_name(player)} pulled {machine.name}"
             f" for {format_amount(machine.currency, stake)}",
         )
+        if self.on_spin is not None:
+            try:
+                self.on_spin(player, result, loot_type)
+            except Exception as ex:  # noqa: BLE001 - telling others about it mustn't break the pull
+                self.log(f"Couldn't share the spin: {ex!r}")
         return result, charged
 
     def settle(self, player_key: str, request_id: int | None = None) -> Payout | None:
@@ -259,7 +332,13 @@ class Casino:
         if pending is None or (request_id is not None and pending.request_id != request_id):
             return None
         del self._pending[player_key]
-        return self._pay_out(pending)
+        payout = self._pay_out(pending)
+        if self.on_settled is not None:
+            try:
+                self.on_settled(pending.player, pending.result, pending.charged, payout)
+            except Exception as ex:  # noqa: BLE001 - keeping score mustn't break the payout
+                self.log(f"Couldn't record the pull: {ex!r}")
+        return payout
 
     def tick(self) -> bool:
         """
@@ -279,8 +358,8 @@ class Casino:
         for key in list(self._pending):
             self.settle(key)
 
-    def _charge(self, player: Any, currency: Currency, stake: int) -> int | str:
-        """Charges the stake, verifying it actually left the wallet. Returns an error on failure."""
+    def _charge(self, player: Any, currency: Currency, stake: int) -> str | None:
+        """Charges the stake, checking it actually left the wallet. Returns why not on failure."""
         balance = self.backend.get_balance(player, currency)
         if balance is None:
             return "Couldn't read your wallet - try 'gamble_diag'."
@@ -289,7 +368,7 @@ class Casino:
             return f"Not enough {name}: a pull costs {format_amount(currency, stake)}."
 
         try:
-            self.backend.add_currency(player, currency, -stake)
+            self.backend.take_currency(player, currency, stake)
         except Exception as ex:  # noqa: BLE001 - anything from the game is reported the same way
             self.log(f"Charging {stake} {currency.value} failed: {ex!r}")
             return "Couldn't charge your wallet - try 'gamble_diag'."
@@ -298,7 +377,7 @@ class Casino:
         if after is None or after > balance - stake:
             self.log(f"Charge of {stake} {currency.value} didn't apply ({balance} -> {after}).")
             return "Charge didn't go through, so no spin - try 'gamble_diag'."
-        return balance - after
+        return None
 
     def _pay(self, player: Any, currency: Currency, amount: int) -> tuple[int, str | None]:
         """Pays out currency, clamped to what the wallet can hold. Returns (paid, error)."""
@@ -327,19 +406,25 @@ class Casino:
             if error:
                 errors.append(error)
 
-        dropped: list[Tier] = []
-        drops = loot.roll_drops(result.loot, self.rng)
+        dropped: list[tuple[Tier, str]] = []
+        drops = loot.roll_drops(result.loot, self.rng, pending.loot_type)
         for idx, (tier, pool) in enumerate(drops):
             try:
                 self.backend.spawn_item(pending.player, pool, pending.loot_level, idx, len(drops))
-                dropped.append(tier)
+                dropped.append((tier, pool))
             except Exception as ex:  # noqa: BLE001
                 self.log(f"Dropping {pool} failed: {ex!r}")
                 errors.append(f"couldn't drop a {tier.value} item")
 
         if errors:
             self.log(f"Payout problems for {self.backend.player_name(pending.player)}: {', '.join(errors)}")
-        return Payout(paid[Currency.CASH], paid[Currency.ERIDIUM], tuple(dropped), tuple(errors))
+        return Payout(
+            paid[Currency.CASH],
+            paid[Currency.ERIDIUM],
+            tuple(tier for tier, _ in dropped),
+            tuple(errors),
+            tuple(pool for _, pool in dropped),
+        )
 
 
 # ==================================================================================================
@@ -347,7 +432,7 @@ class Casino:
 
 
 class CasinoLink(Protocol):
-    def request(self, request_id: int, machine_key: str, bet: int) -> Reply | None:
+    def request(self, request_id: int, machine_key: str, bet: int, loot_type: str) -> Reply | None:
         """Asks for a pull. Returns the reply straight away, or None if it'll arrive later."""
         ...
 
@@ -363,8 +448,8 @@ class LocalLink:
         self.casino = casino
         self.player = player
 
-    def request(self, request_id: int, machine_key: str, bet: int) -> Reply | None:
-        return self.casino.pull(self.player(), request_id, machine_key, bet)
+    def request(self, request_id: int, machine_key: str, bet: int, loot_type: str) -> Reply | None:
+        return self.casino.pull(self.player(), request_id, machine_key, bet, loot_type)
 
     def settle(self, request_id: int) -> Payout | None:
         return self.casino.settle(self.casino.backend.player_key(self.player()), request_id)
@@ -376,8 +461,8 @@ class RemoteLink:
     def __init__(self, send: Callable[[str], None]) -> None:
         self.send = send
 
-    def request(self, request_id: int, machine_key: str, bet: int) -> Reply | None:
-        self.send(protocol.encode(protocol.Pull(request_id, machine_key, bet)))
+    def request(self, request_id: int, machine_key: str, bet: int, loot_type: str) -> Reply | None:
+        self.send(protocol.encode(protocol.Pull(request_id, machine_key, bet, loot_type=loot_type)))
         return None
 
     def settle(self, request_id: int) -> Payout | None:
@@ -395,6 +480,7 @@ class PlayerSettings:
 
     machine_key: str = "cash"
     bet: int = 1
+    loot_type: str = DEFAULT_LOOT_TYPE
     spin_seconds: float = 1.1
     stagger_seconds: float = 0.45
     result_seconds: float = 4.0
@@ -453,6 +539,9 @@ class SlotController:
         self._spinning: _Spinning | None = None
         self._visible_until: float | None = None
         self._last_view: OverlayView | None = None
+        # The last spin that finished, and the settings it was pulled with
+        self.last_result: SpinResult | None = None
+        self.last_settings: PlayerSettings | None = None
 
     @property
     def is_spinning(self) -> bool:
@@ -485,7 +574,7 @@ class SlotController:
         self._next_request_id += 1
         self._waiting = _Waiting(request_id, now, settings)
         try:
-            reply = self.link.request(request_id, settings.machine_key, settings.bet)
+            reply = self.link.request(request_id, settings.machine_key, settings.bet, settings.loot_type)
         except Exception as ex:  # noqa: BLE001 - e.g. the co-op channel isn't available
             self.log(f"Couldn't reach the casino: {ex!r}")
             reply = "Couldn't reach the casino - try 'gamble_diag'."
@@ -530,6 +619,22 @@ class SlotController:
             self._last_view = None
             self.display.hide()
         return self.needs_tick
+
+    def notify(self, text: str, machine_key: str = "cash") -> None:
+        """Shows a message for a few seconds, e.g. why the menu can't open. Ignored mid pull."""
+        if self._waiting is None and self._spinning is None:
+            self._message(text, Tone.ERROR, self.clock(), machine_key)
+
+    def resting_view(self, machine_key: str, status: str = "") -> OverlayView:
+        """Gets how a machine looks between pulls: its reels where they last stopped."""
+        machine_key = machine_key if machine_key in MACHINES else "cash"
+        return OverlayView(
+            title=_title(machine_key),
+            reels=self._reel_views(machine_key, None, self.clock()),
+            status=status,
+            tone=Tone.INFO,
+            footer="",
+        )
 
     def shutdown(self) -> None:
         """Settles anything in progress, then hides the overlay."""
@@ -577,6 +682,8 @@ class SlotController:
             return
         self._spinning = None
         result = spinning.result
+        self.last_result = result
+        self.last_settings = spinning.settings
 
         try:
             payout = self.link.settle(spinning.request_id)
@@ -599,7 +706,7 @@ class SlotController:
             except Exception as ex:  # noqa: BLE001 - never let saving stats break a spin
                 self.log(f"Saving stats failed: {ex!r}")
 
-        status, tone = _describe_result(result, payout)
+        status, tone = describe_result(result, payout, loot.loot_type(spinning.settings.loot_type).noun)
         if payout.errors:
             # The details are in the log, keep the on screen text short
             status = f"{result.prize.title if result.prize else 'Spin'} - payout failed, see console"
@@ -704,7 +811,17 @@ class SlotController:
         self.display.render(view)
 
 
-def _describe_result(result: SpinResult, payout: Payout) -> tuple[str, Tone]:
+def describe_result(result: SpinResult, payout: Payout, noun: str | None = None) -> tuple[str, Tone]:
+    """
+    Describes what a spin won, and how exciting that is.
+
+    Args:
+        result: The spin.
+        payout: What it paid.
+        noun: What the items are, e.g. "shotgun", if the player picked a loot type.
+    Returns:
+        The description, and its tone.
+    """
     if result.prize is None:
         return "No luck this time.", Tone.LOSE
 
@@ -714,7 +831,7 @@ def _describe_result(result: SpinResult, payout: Payout) -> tuple[str, Tone]:
     if payout.eridium:
         winnings.append("+" + format_amount(Currency.ERIDIUM, payout.eridium))
     if payout.items:
-        winnings.append(describe_loot((tier, payout.items.count(tier)) for tier in Tier))
+        winnings.append(describe_loot(((tier, payout.items.count(tier)) for tier in Tier), noun))
 
     status = result.prize.title
     if winnings:

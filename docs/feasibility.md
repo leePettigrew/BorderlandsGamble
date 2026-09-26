@@ -6,7 +6,7 @@
 are very doable as a **PythonSDK mod**. Other published BL4 mods already use every piece of game
 access this needs. What's *hard* is a brand new physical slot machine cabinet with its own 3D model,
 sounds, and lever animation, because the game has no such assets and making them means a full Unreal
-Engine asset pipeline.
+Engine asset pipeline. So the mod's slot machines are look-alikes of the game's vending machines.
 
 ## What Borderlands 4 ships with
 
@@ -36,7 +36,8 @@ write properties, and hook functions. mods_base adds options, keybinds, and cons
 | Need | How | Already done by |
 |---|---|---|
 | Read the wallet | `pc.CurrencyManager.currencies` rows (`type`, `Amount`) | [Matt's SDK Boosting Tools](https://github.com/funkyoushift/MattsSDKBoostingTools) `player_readback.py`, [TrashSeller](https://github.com/FreepDryer/freepdryer-bl4-sdk-mods) |
-| Take/give cash and eridium | `GbxCurrencyFunctionLibrary.GiveCurrency(pc, FGbxDefPtr(token, GbxCurrencyDef), amount)` | Matt's `givecurrency` command (which also accepts negative amounts) |
+| Give cash and eridium | `GbxCurrencyFunctionLibrary.GiveCurrency(pc, FGbxDefPtr(token, GbxCurrencyDef), amount)` | Matt's `givecurrency` command |
+| Take cash and eridium | A negative `GiveCurrency` where the game takes one, otherwise writing the wallet (see [game-api.md](game-api.md#wallet)) | This mod |
 | Know the player's level | `PlayerState.BP_GetExperienceLevel(FGbxDefPtr("Character", GbxExperienceDef))` | Matt's `player_readback.py` |
 | Drop real loot | `NexusConfigStoreItemPool.SpawnInventoryFromItemPool(world, transform, level, pool)` | Matt's shiny and item-pool spawners |
 | Find vending machines | `find_all("OakVendingMachine")` | [GroundLootHelpers](https://github.com/RedxYeti/yeti-bl4-sdk), TrashSeller |
@@ -44,18 +45,35 @@ write properties, and hook functions. mods_base adds options, keybinds, and cons
 | Animate | Hooking `CameraModifier:BlueprintModifyCamera`, which runs every frame | Matt's shared camera tick |
 | React to a machine being used | Hooking a machine's `…UsableActorState_K2_OnUsed` script event | [EncoreTweaks](https://github.com/RedxYeti/yeti-bl4-sdk) (the Big Encore Machine) |
 | Put a real machine in the world | A fresh `Spawner` given an interactive object def, e.g. `IO_VendingMachine_BlackMarket` | Matt's "Spawn Black Market" |
+| Put up a copy of an actor's model | `GameplayStatics.BeginDeferredActorSpawnFromClass` a plain mesh actor, then give it the original's meshes and materials | Matt's [ActorScriptDeployer](https://github.com/funkyoushift/MattsSDKBoostingTools) (MIT) |
+| Clickable menus | Real UMG `Button`s, clicks read by polling `IsPressed`, with the mouse cursor on and movement off | [Matt's BL4 Mods Menu](https://github.com/mattmab/MattsBL4ModsMenu) |
+| Take over a key | The SDK's keybinds hook the game's own input handling, and can keep a key press from the game | The SDK itself (`UGbxEnhancedPlayerInput::InputKey`) |
 
 That covers everything a slot machine needs. [game-api.md](game-api.md) has the details.
 
 ## What's hard, and why
 
-- **A custom cabinet.** A real slot machine model, lever, spinning reel meshes, and jingles all need new
-  assets. That means authoring them in a version-matched Unreal Editor, cooking them, and packaging
-  them as a pak mod. No Python can do that. *Workaround:* reuse existing machines (every vending
-  machine becomes a slot machine) and draw the reels as a UI overlay. That's what this mod does.
-- **Taking over a machine's "use" prompt.** It's possible in principle, since EncoreTweaks hooks the
-  Big Encore Machine. But hijacking vending machines without breaking normal shopping needs in-game
-  research into their script events. For now, a keybind works anywhere near a vending machine.
+- **A custom cabinet model.** A real slot machine model, lever, spinning reels, and jingles all need
+  new assets. Python can only use assets that are already in the game, so new ones mean modelling
+  them, importing them into an Unreal Editor matching the exact engine version BL4 was built with,
+  cooking them for BL4, and packaging them as a pak mod. Gearbox ships no editor or mod kit for BL4,
+  cooked assets that don't match the game's build crash it or fail to load, and every co-op player
+  would need the same pak. None of that can be done or tested from Python.
+  *What the mod does instead:* at the end of each row of vending machines it puts up a look-alike:
+  new, plain actors given the vending machine's own meshes and materials, with a floating **SLOTS**
+  sign (the engine's built-in 3D text). The reels, lever, and paytable live in a menu drawn with the
+  game's UI system.
+- **The game's own "use" prompt (E).** The game only offers "use" on its interactive objects, which
+  carry Gearbox's use logic and data. A look-alike is just meshes, so the game ignores it.
+  *What the mod does instead:* it handles E itself. When you aim at a slot machine, it shows its own
+  "[E] PLAY LOOT SLOTS" prompt, opens the menu on E, and keeps that press from the game. Aim anywhere
+  else and E works as normal.
+  *Cleaner, later:* spawn a real interactive object (Matt's "Spawn Black Market" shows spawning real
+  vending machines works) and turn its "used" event into opening the menu, the way EncoreTweaks hooks
+  the Big Encore Machine's `…UsableActorState_K2_OnUsed`. That would give the game's own prompt, with
+  controller button icons and the interaction highlight. It needs the exact event names for vending
+  machines, which only show up in game: `gamble_trace` records them in one test (see
+  [game-api.md](game-api.md#research-the-games-own-use-prompt)).
 - **Game patches.** Updates can break the SDK or move game APIs. Users hit SDK breakage after
   mid-September 2026 patches ([#16](https://github.com/bl-sdk/oak2-mod-manager/issues/16),
   [#17](https://github.com/bl-sdk/oak2-mod-manager/issues/17)), though other mods were being
@@ -70,12 +88,14 @@ That covers everything a slot machine needs. [game-api.md](game-api.md) has the 
 
 ## Roadmap
 
-1. **MVP (this repo).** Lever keybind at any vending machine, animated overlay reels, cash and eridium
-   machines, loot payouts from the game's pools, bets, luck presets, lifetime stats, exact odds,
-   diagnostics, and co-op with the host as the bank. The first in-game test is next.
-2. **Diegetic machines.** Hook vending-machine interaction (e.g. hold-to-gamble), or spawn dedicated
-   "slot machine" actors in hub areas using the proven Spawner approach, and reuse existing game
-   sounds.
-3. **More games.** Double-or-nothing on items, roulette, blackjack against Moxxi, and daily jackpot
+1. **MVP (done).** Lever keybind at any vending machine, animated reels, cash and eridium machines,
+   loot payouts from the game's pools, bets, luck presets, lifetime stats, exact odds, diagnostics,
+   and co-op with the host as the bank.
+2. **Machines in the world (this version).** Look-alike slot machines at every row of vending
+   machines, the mod's own "[E] Play" prompt, a clickable menu, picking what loot drops, and co-op
+   partners seeing each other's spins. The first in-game test is next.
+3. **The game's own prompt.** With the event names from `gamble_trace`, make the slot machines real
+   interactive objects, and reuse existing game sounds.
+4. **More games.** Double-or-nothing on items, roulette, blackjack against Moxxi, and daily jackpot
    events.
-4. **Custom assets.** A pak mod with a real cabinet model. This is a separate, much larger project.
+5. **Custom assets.** A pak mod with a real cabinet model. This is a separate, much larger project.

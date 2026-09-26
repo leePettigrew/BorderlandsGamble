@@ -8,6 +8,7 @@ from borderlands_gamble.casino import (
     MESSAGE_SECONDS,
     SETTLE_TIMEOUT,
     Casino,
+    DisplaySwitch,
     HouseRules,
     LocalLink,
     Payout,
@@ -49,6 +50,7 @@ class FakePlayer:
 class FakeBackend:
     def __init__(self) -> None:
         self.ignore_charges = False
+        self.fail_charges = False
         self.fail_spawns = False
         self.currency_calls: list[tuple[str, Currency, int]] = []
         self.spawned: list[tuple[str, str, int, int, int]] = []
@@ -73,9 +75,14 @@ class FakeBackend:
 
     def add_currency(self, player: FakePlayer, currency: Currency, amount: int) -> None:
         self.currency_calls.append((player.name, currency, amount))
-        if amount < 0 and self.ignore_charges:
-            return
         player.balances[currency] += amount
+
+    def take_currency(self, player: FakePlayer, currency: Currency, amount: int) -> None:
+        self.currency_calls.append((player.name, currency, -amount))
+        if self.fail_charges:
+            raise RuntimeError("wallet locked")
+        if not self.ignore_charges:
+            player.balances[currency] -= amount
 
     def spawn_item(self, player: FakePlayer, pool: str, level: int, index: int, count: int) -> None:
         if self.fail_spawns:
@@ -154,10 +161,19 @@ class CasinoRefusalTests(CasinoTestCase):
         self.assertIn("didn't go through", reply)
         self.assertFalse(casino.has_pending)
 
+    def test_charge_that_fails_voids_the_spin(self) -> None:
+        casino = self.make_casino([(S.VAULT,) * 3])
+        self.backend.fail_charges = True
+        reply = casino.pull(self.player, 1, "cash", 1)
+        self.assertIn("Couldn't charge your wallet", reply)
+        self.assertFalse(casino.has_pending)
+        self.assertEqual(self.player.balances[Currency.CASH], 1_000_000)
+
     def test_bad_requests(self) -> None:
         casino = self.make_casino()
         self.assert_refused(casino.pull(self.player, 1, "roulette", 1), "Unknown machine")
         self.assert_refused(casino.pull(self.player, 1, "cash", 3), "Unsupported bet")
+        self.assert_refused(casino.pull(self.player, 1, "cash", 1, "rocket_launchers"), "Unknown drop type")
 
 
 class CasinoPayoutTests(CasinoTestCase):
@@ -252,11 +268,89 @@ class CasinoPayoutTests(CasinoTestCase):
         self.assertEqual(payout.cash, 5 * STAKE_50)
         self.assertTrue(payout.errors)
 
+    def test_loot_types_change_the_price_and_the_drops(self) -> None:
+        casino = self.make_casino([(S.RARE,) * 3, (S.LEGENDARY,) * 3, (S.EPIC,) * 3])
+        _, charged = casino.pull(self.player, 1, "cash", 1, "shotguns")
+        self.assertEqual(charged, 75_000)
+        casino.settle_all()
+        _, charged = casino.pull(self.player, 2, "cash", 2, "class_mods")
+        self.assertEqual(charged, 2 * 100_000)
+        casino.settle_all()
+        _, charged = casino.pull(self.player, 3, "eridium", 1, "guns")
+        self.assertEqual(charged, 13)
+        casino.settle_all()
+        pools = [pool for _, pool, *_ in self.backend.spawned]
+        self.assertEqual(
+            pools[:3],
+            ["itempool_sg_03_rare", "itempool_class_mods_05_legendary", "itempool_class_mods_05_legendary"],
+        )
+        self.assertTrue(
+            pools[3].endswith("_04_epic") and pools[3].split("_")[1] in {"ar", "ps", "sm", "sg", "sr", "hw"}
+        )
+
+    def test_every_spin_is_shared(self) -> None:
+        shared: list[tuple[Any, Any, str]] = []
+        casino = self.make_casino([(S.CASH,) * 3])
+        casino.on_spin = lambda player, result, loot_type: shared.append((player, result.line, loot_type))
+        casino.pull(self.player, 1, "cash", 1, "shields")
+        self.assertEqual(shared, [(self.player, (S.CASH,) * 3, "shields")])
+
+        # Refused pulls aren't, and a broken listener doesn't stop the pull
+        self.player.near_machine = False
+        casino.pull(self.player, 2, "cash", 1)
+        self.assertEqual(len(shared), 1)
+        self.player.near_machine = True
+
+        def explode(*_: Any) -> None:
+            raise RuntimeError("no network")
+
+        casino.on_spin = explode
+        self.assertIsInstance(casino.pull(self.player, 3, "cash", 1), tuple)
+
+    def test_every_payout_is_reported(self) -> None:
+        settled: list[tuple[Any, Any, int, Payout]] = []
+        casino = self.make_casino([(S.LEGENDARY,) * 3, (S.SKULL,) * 3])
+        casino.on_settled = lambda player, result, charged, payout: settled.append(
+            (player, result.line, charged, payout),
+        )
+        casino.pull(self.player, 1, "cash", 1, "shotguns")
+        self.assertEqual(settled, [], "not until it pays out")
+        casino.settle("Amara", 1)
+        [(player, line, charged, payout)] = settled
+        self.assertEqual((player, line, charged), (self.player, (S.LEGENDARY,) * 3, 75_000))
+        self.assertEqual(payout.items, (Tier.LEGENDARY,))
+        self.assertEqual(payout.pools, ("itempool_sg_05_legendary",))
+
+        # Paid out by the timeout too, and on free play nothing was charged
+        casino = self.make_casino([(S.SKULL,) * 3], free_play=True)
+        casino.on_settled = lambda *args: settled.append(args)
+        casino.pull(self.player, 2, "cash", 1)
+        self.clock.now += 60
+        casino.tick()
+        self.assertEqual(settled[-1][2], 0)
+
+    def test_failed_drops_are_left_out_of_the_report(self) -> None:
+        casino = self.make_casino([(S.LEGENDARY,) * 3])
+        self.backend.fail_spawns = True
+        casino.pull(self.player, 1, "cash", 1)
+        payout = casino.settle("Amara")
+        self.assertEqual((payout.items, payout.pools), ((), ()))
+
+    def test_a_broken_score_keeper_doesnt_stop_the_payout(self) -> None:
+        casino = self.make_casino([(S.CASH,) * 3])
+
+        def explode(*_: Any) -> None:
+            raise RuntimeError("disk full")
+
+        casino.on_settled = explode
+        casino.pull(self.player, 1, "cash", 1)
+        self.assertEqual(casino.settle("Amara"), Payout(cash=20 * STAKE_50))
+
     def test_unreadable_level_prices_as_level_one(self) -> None:
         casino = self.make_casino([(S.SKULL, S.CASH, S.EPIC)])
         self.player.level = None
         casino.pull(self.player, 1, "cash", 1)
-        self.assertEqual(self.backend.currency_calls, [("Amara", Currency.CASH, -10)])
+        self.assertEqual(self.backend.currency_calls, [("Amara", Currency.CASH, -1000)])
 
 
 class ControllerTestCase(CasinoTestCase):
@@ -396,6 +490,78 @@ class ControllerTests(ControllerTestCase):
         controller.pull()
         self.assertFalse(controller.is_spinning)
         self.assertEqual(len(self.backend.spawned), 1)
+
+    def test_loot_type_is_sent_and_named(self) -> None:
+        controller = self.make([(S.RARE,) * 3], loot_type="snipers")
+        controller.pull()
+        self.run_until_idle(controller)
+        self.assertEqual(self.backend.spawned[0][1], "itempool_sr_03_rare")
+        self.assertEqual(self.final_view().status, "Rare loot!  1 rare sniper rifle")
+        self.assertEqual(self.player.balances[Currency.CASH], 1_000_000 - 75_000)
+
+    def test_resting_view_and_last_result(self) -> None:
+        controller = self.make([(S.EPIC, S.CASH, S.VAULT)])
+        self.assertIsNone(controller.last_result)
+        controller.pull()
+        self.run_until_idle(controller)
+        assert controller.last_result is not None
+        self.assertEqual(controller.last_result.line, (S.EPIC, S.CASH, S.VAULT))
+
+        # Between pulls, the reels stay where they stopped
+        view = controller.resting_view("cash", "Pull the lever!")
+        self.assertEqual(tuple(reel.payline for reel in view.reels), (S.EPIC, S.CASH, S.VAULT))
+        self.assertTrue(all(reel.stopped for reel in view.reels))
+        self.assertEqual((view.title, view.status, view.tone), ("LOOT SLOTS", "Pull the lever!", Tone.INFO))
+        self.assertEqual(controller.resting_view("nope").title, "LOOT SLOTS")
+
+
+class NotifyTests(ControllerTestCase):
+    def test_notify(self) -> None:
+        controller = self.make([(S.CASH,) * 3])
+        controller.notify("Find a machine.", "eridium")
+        self.assertEqual(
+            (self.display.views[-1].status, self.display.views[-1].title),
+            ("Find a machine.", "ERIDIUM SLOTS"),
+        )
+        self.assertTrue(controller.needs_tick)
+        self.clock.now += MESSAGE_SECONDS
+        self.assertFalse(controller.tick())
+
+        # Never interrupts a pull
+        controller.pull()
+        views = len(self.display.views)
+        controller.notify("Find a machine.")
+        self.assertEqual(len(self.display.views), views)
+
+
+class DisplaySwitchTests(ControllerTestCase):
+    def test_moves_the_spin_between_displays(self) -> None:
+        controller = self.make([(S.CASH,) * 3])
+        hud, menu = FakeDisplay(), FakeDisplay()
+        switch = DisplaySwitch({"hud": hud, "menu": menu}, "menu")
+        controller.display = switch
+
+        controller.pull()
+        self.clock.now += 0.1
+        controller.tick()
+        spinning_views = len(menu.views)
+        self.assertGreater(spinning_views, 0)
+        self.assertEqual(hud.views, [])
+
+        # Closing the menu mid spin carries on on the HUD
+        switch.switch("hud")
+        self.assertEqual(menu.hidden, 1)
+        self.assertEqual(hud.views[-1], menu.views[-1])
+        self.run_until_idle(controller)
+        self.assertEqual(len(menu.views), spinning_views)
+        self.assertIn("Cash out!", hud.views[-1].status)
+        self.assertEqual(hud.hidden, 1)
+
+        # Nothing on screen, so switching back doesn't draw anything
+        switch.switch("menu")
+        switch.switch("menu")
+        self.assertEqual(len(menu.views), spinning_views)
+        self.assertEqual(hud.hidden, 1)
 
 
 class ExpectedPayoutTests(unittest.TestCase):

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .casino import Casino, SlotController
+    from .leaderboard import SpinRecord
 
 
 def handle_host_message(
@@ -57,7 +58,9 @@ def handle_host_message(
                 ),
             )
         case protocol.Pull():
-            outcome = casino.pull(player, message.request_id, message.machine_key, message.bet)
+            outcome = casino.pull(
+                player, message.request_id, message.machine_key, message.bet, message.loot_type
+            )
             if isinstance(outcome, str):
                 reply(protocol.encode(protocol.Error(message.request_id, outcome)))
             else:
@@ -66,6 +69,7 @@ def handle_host_message(
         case protocol.Settle():
             casino.settle(casino.backend.player_key(player), message.request_id)
         case protocol.Ping():
+            log(f"{casino.backend.player_name(player)} ran the co-op test. Answering.")
             reply(protocol.encode(protocol.Pong(message.nonce)))
         case _:
             log(f"Ignoring a host-bound {type(message).__name__} from {casino.backend.player_name(player)}")
@@ -77,6 +81,8 @@ def handle_client_message(
     text: str,
     on_pong: Callable[[protocol.Pong], None],
     log: Callable[[str], None],
+    on_show: Callable[[protocol.Show], None] | None = None,
+    on_record: Callable[[SpinRecord], None] | None = None,
 ) -> bool:
     """
     Handles a message the host sent to this client.
@@ -86,6 +92,8 @@ def handle_client_message(
         text: The raw message.
         on_pong: Called with the host's reply to a ping.
         log: Where to log problems.
+        on_show: Called when another player pulled, so we can watch.
+        on_record: Called with each pull the host pays out, anyone's, for the leaderboard.
     Returns:
         True if the message was one of ours (whether or not it could be handled).
     """
@@ -104,6 +112,12 @@ def handle_client_message(
             controller.receive_error(message.request_id, message.text)
         case protocol.Pong():
             on_pong(message)
+        case protocol.Show():
+            if on_show is not None:
+                on_show(message)
+        case protocol.SpinRecord():
+            if on_record is not None:
+                on_record(message)
         case _:
             log(f"Ignoring a client-bound {type(message).__name__} from the host")
     return True

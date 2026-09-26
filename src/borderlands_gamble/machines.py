@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
-from .slots import Currency, Machine, Pattern, Prize, Reel, Symbol, Tier
+from .slots import Currency, Machine, Pattern, Prize, Reel, SpinResult, Symbol, Tier, scale_prize
+
+if TYPE_CHECKING:
+    from .slots import Line
 
 S = Symbol
 
@@ -93,10 +97,8 @@ DEFAULT_LUCK = "Fair"
 
 BET_MULTIPLIERS: tuple[int, ...] = (1, 2, 5, 10)
 
-# Cash cost of a 1x pull at level 1, and how much it grows per level. Borderlands money scales
-# exponentially with level; this lands around $2.6k at level 50 and $25k at level 70.
-CASH_BASE_COST = 10.0
-CASH_COST_GROWTH = 1.12
+# Cash cost of a 1x pull, per player level: $1,000 at level 1, $50k at level 50
+CASH_COST_PER_LEVEL = 1000
 ERIDIUM_BASE_COST = 10.0
 
 
@@ -121,8 +123,31 @@ def base_cost(machine: Machine, level: int) -> int:
         The cost, in the machine's currency.
     """
     if machine.currency is Currency.CASH:
-        return nice_round(CASH_BASE_COST * CASH_COST_GROWTH ** (max(1, level) - 1))
+        return CASH_COST_PER_LEVEL * max(1, level)
     return nice_round(ERIDIUM_BASE_COST)
+
+
+def replay(machine_key: str, line: Line, bet: int, stake: int) -> SpinResult:
+    """
+    Rebuilds a spin from its line of symbols, e.g. one that another player's game rolled.
+
+    Luck only changes how often symbols come up, not what they pay, so the base machine's paytable
+    gives the same prize the roll did.
+    """
+    machine = MACHINES[machine_key]
+    prize = machine.evaluate(line)
+    payout, eridium, loot = scale_prize(prize, stake, bet)
+    return SpinResult(
+        machine_key=machine_key,
+        currency=machine.currency,
+        line=line,
+        prize=prize,
+        bet=bet,
+        stake=stake,
+        payout=payout,
+        eridium=eridium,
+        loot=loot,
+    )
 
 
 def spin_cost(machine: Machine, level: int, *, bet: int = 1, cost_multiplier: float = 1.0) -> int:
