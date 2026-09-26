@@ -11,4 +11,4 @@ cash or eridium for more cash, eridium, and real loot from the game's own item p
 name = "Borderlands Gamble"
 version = "0.2.0"
 supported_games = ["BL4"]
-coop_support = "HostOnly"
+coop_support = "RequiresAllPlayers"

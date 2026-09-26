@@ -50,7 +50,7 @@ class ModMetadataTests(unittest.TestCase):
     def test_sdkmod_fields(self) -> None:
         sdkmod = self.pyproject["tool"]["sdkmod"]
         self.assertEqual(sdkmod["supported_games"], ["BL4"])
-        self.assertEqual(sdkmod["coop_support"], "HostOnly")
+        self.assertEqual(sdkmod["coop_support"], "RequiresAllPlayers")
         self.assertEqual(sdkmod["version"], self.pyproject["project"]["version"])
 
     def test_version_parses_like_mods_base(self) -> None:
