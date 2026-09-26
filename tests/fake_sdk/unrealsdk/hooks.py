@@ -47,9 +47,10 @@ def prevent_hooking_direct_calls() -> Iterator[None]:
     yield
 
 
-def fire(func: str, type: Type = Type.POST) -> int:
-    """Test helper: calls every hook on a function, like the engine calling it. Returns how many."""
-    callbacks = list(HOOKS.get((func, type), {}).values())
-    for callback in callbacks:
-        callback(None, None, None, None)
-    return len(callbacks)
+def fire(func: str, type: Type = Type.POST, obj: Any = None, args: Any = None) -> bool:
+    """Test helper: runs every hook on a function, like the engine calling it. Returns if blocked."""
+    blocked = False
+    for callback in list(HOOKS.get((func, type), {}).values()):
+        ret = callback(obj, args, None, None)
+        blocked |= ret is Block or isinstance(ret, Block)
+    return blocked

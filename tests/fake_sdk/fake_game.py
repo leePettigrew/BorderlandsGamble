@@ -87,8 +87,12 @@ class CurrencyManager(FakeObject):
 
 
 class PlayerState(FakeObject):
-    def __init__(self, level: int) -> None:
+    def __init__(self, name: str, level: int) -> None:
+        self.name = name
         self.level = level
+
+    def GetPlayerName(self) -> str:
+        return self.name
 
     def BP_GetExperienceLevel(self, ptr: FGbxDefPtr) -> int:
         if ptr._name != "Character":
@@ -97,8 +101,8 @@ class PlayerState(FakeObject):
 
 
 class Pawn(FakeObject):
-    def __init__(self) -> None:
-        self.location = (1000.0, 2000.0, 300.0)
+    def __init__(self, location: tuple[float, float, float]) -> None:
+        self.location = location
         self.yaw = 90.0
 
     def K2_GetActorLocation(self) -> WrappedStruct:
@@ -117,16 +121,42 @@ class Pawn(FakeObject):
 
 
 class PlayerController(FakeObject):
-    Name = "OakPlayerController_0"
-
-    def __init__(self, level: int, balances: dict[str, int]) -> None:
-        self.Pawn = Pawn()
-        self.PlayerState = PlayerState(level)
+    def __init__(
+        self,
+        name: str,
+        level: int,
+        balances: dict[str, int],
+        location: tuple[float, float, float],
+        *,
+        local: bool,
+    ) -> None:
+        self.Name = f"OakPlayerController_{name}"
+        self.Pawn = Pawn(location)
+        self.PlayerState = PlayerState(name, level)
         self.CurrencyManager = CurrencyManager(balances)
+        self.local = local
         self.authority = True
+        # Network calls made on this controller, as (function, text)
+        self.sent: list[tuple[str, str]] = []
 
     def HasAuthority(self) -> bool:
         return self.authority
+
+    def IsLocalController(self) -> bool:
+        return self.local
+
+    def ServerExec(self, msg: str) -> None:
+        if not isinstance(msg, str):
+            raise TypeError("ServerExec takes a string")
+        self.sent.append(("ServerExec", msg))
+
+    def ClientMessage(self, s: str, msg_type: str, lifetime: float) -> None:
+        if not isinstance(s, str) or not isinstance(msg_type, str):
+            raise TypeError("ClientMessage takes (string, name, float)")
+        self.sent.append(("ClientMessage", s))
+
+    def cash(self) -> int:
+        return self.CurrencyManager.row("Cash").Amount
 
 
 # ==================================================================================================
@@ -140,12 +170,12 @@ class CurrencyLibrary(FakeObject):
         self.game = game
 
     def GiveCurrency(self, context: Any, ptr: FGbxDefPtr, amount: int) -> None:
-        if context is not self.game.pc:
-            raise TypeError("Expected the player controller as context")
+        if context not in (self.game.pc, self.game.friend):
+            raise TypeError("Expected a player controller as context")
         if not isinstance(ptr._type, UScriptStruct) or ptr._type.Name != "GbxCurrencyDef":
             raise TypeError("Expected a GbxCurrencyDef pointer")
-        self.game.give_calls.append((ptr._name, amount))
-        row = self.game.pc.CurrencyManager.row(ptr._name)
+        self.game.give_calls.append((context.PlayerState.name, ptr._name, amount))
+        row = context.CurrencyManager.row(ptr._name)
         row.Amount = max(0, min(row.Amount + amount, 2_147_483_647))
 
 
@@ -314,8 +344,11 @@ WIDGET_CLASSES: dict[str, type] = {
 class Game:
     def __init__(self) -> None:
         self.engine = Engine(self)
-        self.pc = PlayerController(level=50, balances={"Cash": 1_000_000, "eridium": 500})
-        self.give_calls: list[tuple[str, int]] = []
+        balances = {"Cash": 1_000_000, "eridium": 500}
+        # The local player, and a co-op partner who exists on the host as a remote controller
+        self.pc = PlayerController("Moze", 50, dict(balances), (1000.0, 2000.0, 300.0), local=True)
+        self.friend = PlayerController("Zane", 20, dict(balances), (1300.0, 2000.0, 300.0), local=False)
+        self.give_calls: list[tuple[str, str, int]] = []
         self.spawned: list[tuple[str, int, tuple[float, float, float]]] = []
         self.machines = [
             VendingMachine("Default__OakVendingMachine", (1000.0, 2000.0, 300.0)),
@@ -344,7 +377,11 @@ class Game:
             return ClassDefault(name, None)
         if cls == "Class" and name == "/Script/UMG.WidgetLayoutLibrary":
             return ClassDefault(name, WidgetLayoutLibrary())
-        if cls == "Function" and name == "/Script/Engine.CameraModifier:BlueprintModifyCamera":
+        if cls == "Function" and name in (
+            "/Script/Engine.CameraModifier:BlueprintModifyCamera",
+            "/Script/Engine.PlayerController:ServerExec",
+            "/Script/Engine.PlayerController:ClientMessage",
+        ):
             return FakeObject()
         raise ValueError(f"Couldn't find {cls} '{name}'")
 
@@ -374,7 +411,7 @@ class Game:
         return [w for w in self.widgets if isinstance(w, TextBlock)]
 
     def cash(self) -> int:
-        return self.pc.CurrencyManager.row("Cash").Amount
+        return self.pc.cash()
 
     def collect_widgets(self) -> None:
         """Simulates a map change garbage collecting every widget."""

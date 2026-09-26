@@ -24,6 +24,8 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 TICK_FUNC = "/Script/Engine.CameraModifier:BlueprintModifyCamera"
+SERVER_RPC = "/Script/Engine.PlayerController:ServerExec"
+CLIENT_RPC = "/Script/Engine.PlayerController:ClientMessage"
 
 
 class FakeClock:
@@ -79,9 +81,14 @@ def main(mods_base_dir: Path) -> None:
     mod = gamble.mod
 
     assert mod.name == "Borderlands Gamble", mod.name
-    assert mod.version == "0.1.0", mod.version
+    assert mod.version == "0.2.0", mod.version
     assert not mod.enabling_locked, "mod should be allowed to enable in BL4"
     assert ".sdkmod" in str(sdk_mod.__file__), f"should import from the .sdkmod, not {sdk_mod.__file__}"
+
+    from unrealsdk.unreal import WrappedStruct
+
+    from borderlands_gamble import protocol
+    from borderlands_gamble.slots import Symbol
 
     def tick_until_idle(limit: float = 30.0) -> int:
         frames = 0
@@ -101,7 +108,7 @@ def main(mods_base_dir: Path) -> None:
 
     mod.enable()
     assert mod.is_enabled
-    for cmd in ("gamble_spin", "gamble_odds", "gamble_stats", "gamble_diag"):
+    for cmd in ("gamble_spin", "gamble_odds", "gamble_stats", "gamble_diag", "gamble_coop_test"):
         assert commands.has_command(cmd), cmd
 
     # Diagnostics should find everything in the fake game
@@ -114,9 +121,7 @@ def main(mods_base_dir: Path) -> None:
 
     # A rigged jackpot on Loot Slots
     rng = RiggedRandom()
-    sdk_mod.controller.rng = rng
-    from borderlands_gamble.slots import Symbol
-
+    sdk_mod.casino.rng = rng
     rng.queue = [Symbol.VAULT] * 3
     commands.run("gamble_spin")
     assert game.cash() == 1_000_000 - 2600, game.cash()
@@ -145,8 +150,10 @@ def main(mods_base_dir: Path) -> None:
     # Eridium Slots via the keybind, with a 2x bet, pulled twice to skip the animation
     sdk_mod.switch_machine_keybind.callback()
     sdk_mod.change_bet_keybind.callback()
-    assert sdk_mod.current_settings().machine_key == "eridium"
-    assert sdk_mod.current_settings().bet == 2
+    assert sdk_mod.player_settings().machine_key == "eridium"
+    assert sdk_mod.player_settings().bet == 2
+    saved = json.loads(settings_file.read_text())
+    assert saved["options"]["Your Machine"]["machine"] == "Eridium Slots", saved
     rng.queue = [Symbol.ERIDIUM] * 3
     eridium_before = game.pc.CurrencyManager.row("eridium").Amount
     sdk_mod.pull_lever_keybind.callback()
@@ -164,12 +171,91 @@ def main(mods_base_dir: Path) -> None:
     tick_until_idle()
     game.pc.Pawn.location = (1000.0, 2000.0, 300.0)
 
-    # Co-op clients can't play
-    game.pc.authority = False
-    commands.run("gamble_spin")
-    assert len(game.give_calls) == calls_before
-    assert any("host-only" in text for text in statuses())
+    # ---- Co-op, as the host: our partner Zane's pulls arrive as ServerExec calls ----
+    def from_friend(message: protocol.Message | str) -> bool:
+        text = message if isinstance(message, str) else protocol.encode(message)
+        return hooks.fire(SERVER_RPC, hooks.Type.PRE, game.friend, WrappedStruct("ServerExec", Msg=text))
+
+    def replies_to_friend() -> list[protocol.Message | None]:
+        replies = [protocol.decode(text) for func, text in game.friend.sent if func == "ClientMessage"]
+        game.friend.sent.clear()
+        return replies
+
+    assert not from_friend("stat fps"), "other ServerExec traffic must pass through"
+    assert from_friend(protocol.Ping(7))
+    assert replies_to_friend() == [protocol.Pong(7)]
+
+    host_cash, friend_cash = game.cash(), game.friend.cash()
+    rng.queue = [Symbol.LEGENDARY] * 3
+    assert from_friend(protocol.Pull(1, "cash", 1))
+    [reply] = replies_to_friend()
+    assert isinstance(reply, protocol.Result) and reply.line == (Symbol.LEGENDARY,) * 3, reply
+    assert reply.charged == reply.stake == 86, reply  # Zane is level 20
+    assert game.friend.cash() == friend_cash - 86
+    spawned_before = len(game.spawned)
+    assert from_friend(protocol.Settle(1))
+    assert game.friend.cash() == friend_cash - 86 + 5 * 86
+    assert game.cash() == host_cash, "the host's own wallet is never touched"
+    [(pool, level, (x, _, _))] = game.spawned[spawned_before:]
+    assert pool.endswith("_05_legendary") and level == 20 and x > 1200, game.spawned[-1]
+
+    game.friend.Pawn.location = (90_000.0, 0.0, 0.0)
+    assert from_friend(protocol.Pull(2, "cash", 1))
+    [reply] = replies_to_friend()
+    assert isinstance(reply, protocol.Error) and "vending machine" in reply.text, reply
+    game.friend.Pawn.location = (1300.0, 2000.0, 300.0)
+
+    assert from_friend("BLGMB|1|pull|3|cash|1|0.0.1")
+    [reply] = replies_to_friend()
+    assert isinstance(reply, protocol.Error) and "Version mismatch" in reply.text, reply
+
+    # If Zane's game never confirms the reels stopped, the host still pays out
+    rng.queue = [Symbol.CASH] * 3
+    friend_cash = game.friend.cash()
+    assert from_friend(protocol.Pull(4, "cash", 1))
+    replies_to_friend()
     tick_until_idle()
+    assert game.friend.cash() == friend_cash - 86 + 20 * 86, game.friend.cash()
+
+    # ---- Co-op, as a client: our pulls go to the host over ServerExec ----
+    game.pc.authority = False
+    game.pc.sent.clear()
+    wallet = (game.cash(), game.pc.CurrencyManager.row("eridium").Amount)
+    jackpots_before = sdk_mod.stats.jackpots
+
+    def from_host(message: protocol.Message | str) -> bool:
+        text = message if isinstance(message, str) else protocol.encode(message)
+        args = WrappedStruct("ClientMessage", S=text, Type="None", MsgLifeTime=0.0)
+        return hooks.fire(CLIENT_RPC, hooks.Type.PRE, game.pc, args)
+
+    commands.run("gamble_spin")
+    [(func, text)] = game.pc.sent
+    pull = protocol.decode(text)
+    assert func == "ServerExec" and isinstance(pull, protocol.Pull), (func, text)
+    assert (pull.machine_key, pull.bet) == ("eridium", 2), pull
+    assert sdk_mod.controller.is_waiting
+    assert any("Pulling the lever" in text for text in statuses())
+
+    assert from_host(protocol.Result(pull.request_id, "eridium", (Symbol.VAULT,) * 3, 2, 20, 20))
+    assert sdk_mod.controller.is_spinning
+    tick_until_idle()
+    assert game.pc.sent[-1] == ("ServerExec", protocol.encode(protocol.Settle(pull.request_id)))
+    assert sdk_mod.stats.jackpots == jackpots_before + 1
+    assert any("JACKPOT!" in text and "6 legendary" in text for text in statuses()), statuses()
+    assert (game.cash(), game.pc.CurrencyManager.row("eridium").Amount) == wallet, "the host pays, not us"
+
+    assert not from_host("Welcome to Kairos!"), "other ClientMessages must pass through"
+
+    commands.run("gamble_coop_test")
+    ping = protocol.decode(game.pc.sent[-1][1])
+    assert isinstance(ping, protocol.Ping), ping
+    assert from_host(protocol.Pong(ping.nonce))
+    assert any("the host answered" in line for line in logged("info")), logged("info")[-5:]
+    assert any("all good" in line for line in logged("info"))
+
+    commands.run("gamble_spin")
+    tick_until_idle()
+    assert any("No answer from the host" in text for text in statuses())
     game.pc.authority = True
 
     # A map change garbage collects the overlay - the next pull should rebuild it
@@ -189,6 +275,8 @@ def main(mods_base_dir: Path) -> None:
     # Eridium Slots pay 2 rares for three RARE symbols, doubled by the 2x bet
     assert len(game.spawned) == spawned_before + 4, game.spawned[spawned_before:]
     assert not hooks.has_hook(TICK_FUNC, hooks.Type.POST, sdk_mod.frame_tick.hook_identifier)
+    assert not hooks.has_hook(SERVER_RPC, hooks.Type.PRE, "borderlands_gamble.coop")
+    assert not hooks.has_hook(CLIENT_RPC, hooks.Type.PRE, "borderlands_gamble.coop")
     assert not user_widgets[-1].in_viewport
     assert not commands.has_command("gamble_spin")
 
