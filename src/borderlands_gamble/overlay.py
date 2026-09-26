@@ -9,6 +9,7 @@ The menu (`menu.py`) builds on the same pieces.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +22,9 @@ from .casino import OverlayView, Tone
 from .slots import SYMBOL_COLORS, SYMBOL_LABELS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator, Sequence
+
+    from .spectate import WatchedSpin
 
 RGBA = tuple[float, float, float, float]
 
@@ -80,6 +83,17 @@ FOOTER_SCALE = 0.75
 EDGE_SYMBOL_ALPHA = 0.35
 SPINNING_SYMBOL_ALPHA = 0.85
 
+# Other players' reels, floating above their heads. Players off screen or far away get theirs stacked
+# in the top left corner instead.
+SPECTATOR_Z = 997_000
+SPECTATOR_W = 380.0
+SPECTATOR_H = 116.0
+SPECTATOR_PANELS = 3
+DOCK_X = 24.0
+DOCK_Y = 140.0
+DOCK_GAP = 12.0
+SPECTATOR_BG: RGBA = (0.04, 0.03, 0.07, 0.82)
+
 # The prompt sits a little below the crosshair.
 PROMPT_Y = 0.62
 PROMPT_W = 420.0
@@ -129,6 +143,19 @@ class Screen:
         return min(self.width / DESIGN_W, self.height / DESIGN_H) * max(0.1, user_scale)
 
 
+@contextmanager
+def removed_on_failure(root: UObject) -> Iterator[None]:
+    """Takes a half built widget back off the screen if building it fails, so they can't pile up."""
+    try:
+        yield
+    except BaseException:
+        try:
+            root.RemoveFromParent()
+        except Exception as ex:  # noqa: BLE001
+            logging.dev_warning(f"[Borderlands Gamble] Couldn't remove a half built widget: {ex!r}")
+        raise
+
+
 def new_root(pc: UObject, z: int) -> tuple[UObject, UObject, Screen]:
     """Creates an empty, collapsed, full screen `UserWidget`. Returns it, its canvas, and the screen."""
     screen = screen_size(pc)
@@ -154,9 +181,26 @@ class Builder:
         self.center = center
         self.scale = scale
 
-    def construct(self, path: str, visibility: int = HIT_TEST_INVISIBLE) -> UObject:
+    def construct(
+        self,
+        path: str,
+        visibility: int = HIT_TEST_INVISIBLE,
+        setup: Callable[[UObject], None] | None = None,
+    ) -> UObject:
+        """
+        Creates a widget on the canvas.
+
+        Args:
+            path: The widget's class.
+            visibility: Its `ESlateVisibility`.
+            setup: Called with the widget before it's added, for settings that only apply then.
+        Returns:
+            The new widget.
+        """
         widget = unrealsdk.construct_object(ui_class(path), self.root.WidgetTree)
         widget.SetVisibility(visibility)
+        if setup is not None:
+            setup(widget)
         self.canvas.AddChild(widget)
         return widget
 
@@ -308,6 +352,12 @@ class UmgOverlay:
             raise RuntimeError("No player controller to draw for")
 
         root, canvas, screen = new_root(pc, VIEWPORT_Z)
+        with removed_on_failure(root):
+            return self._fill(root, canvas, screen, user_scale, position)
+
+    def _fill(
+        self, root: UObject, canvas: UObject, screen: Screen, user_scale: float, position: str
+    ) -> _Widgets:
         scale = screen.fit(user_scale)
         center_x = screen.width / 2
         match position:
@@ -409,13 +459,157 @@ class UmgPrompt:
         if pc is None:
             raise RuntimeError("No player controller to draw for")
         root, canvas, screen = new_root(pc, PROMPT_Z)
-        ui = Builder(root, canvas, (screen.width / 2, screen.height * PROMPT_Y), screen.fit())
-        ui.box(-PROMPT_W / 2 - 2, -PROMPT_H / 2 - 2, PROMPT_W + 4, PROMPT_H + 4, GOLD, 0)
-        ui.box(-PROMPT_W / 2, -PROMPT_H / 2, PROMPT_W, PROMPT_H, PROMPT_BG, 1)
-        label = ui.text(0, 0, PROMPT_SCALE, 2)
-        label.SetColorAndOpacity(slate(GOLD))
+        with removed_on_failure(root):
+            ui = Builder(root, canvas, (screen.width / 2, screen.height * PROMPT_Y), screen.fit())
+            ui.box(-PROMPT_W / 2 - 2, -PROMPT_H / 2 - 2, PROMPT_W + 4, PROMPT_H + 4, GOLD, 0)
+            ui.box(-PROMPT_W / 2, -PROMPT_H / 2, PROMPT_W, PROMPT_H, PROMPT_BG, 1)
+            label = ui.text(0, 0, PROMPT_SCALE, 2)
+            label.SetColorAndOpacity(slate(GOLD))
         self._root = WeakPointer(root)
         self._label = label
+        return root
+
+
+@dataclass
+class _SpectatorPanel:
+    canvas: UObject
+    title: UObject
+    symbols: tuple[UObject, UObject, UObject]
+    status: UObject
+
+
+class UmgSpectators:
+    """Draws other players' spins as small reels floating above their heads (see `spectate.py`)."""
+
+    def __init__(self) -> None:
+        self._root: WeakPointer = WeakPointer()
+        self._panels: list[_SpectatorPanel] = []
+        self._screen = Screen(DESIGN_W, DESIGN_H, 1.0)
+        self._scale = 1.0
+        self._cache = WidgetCache()
+        self._visible = False
+        self._reported_failure = False
+
+    def draw(self, spins: Sequence[tuple[WatchedSpin, tuple[float, float] | None]]) -> None:
+        """
+        Draws other players' spins.
+
+        Args:
+            spins: Each spin, with the point on screen (in pixels) just above that player's head, or
+                   None to show it in the corner instead.
+        """
+        if not spins:
+            self.hide()
+            return
+        try:
+            root = self._ensure_built()
+            for index, panel in enumerate(self._panels):
+                shown = index < len(spins)
+                self._cache.set(
+                    panel.canvas,
+                    "visibility",
+                    shown,
+                    lambda value, canvas=panel.canvas: canvas.SetVisibility(
+                        HIT_TEST_INVISIBLE if value else COLLAPSED
+                    ),
+                )
+                if shown:
+                    spin, point = spins[index]
+                    self._apply(panel, spin)
+                    self._place(panel, point, index)
+            if not self._visible:
+                root.SetVisibility(HIT_TEST_INVISIBLE)
+                self._visible = True
+            self._reported_failure = False
+        except Exception as ex:  # noqa: BLE001 - never let drawing break the game
+            if not self._reported_failure:
+                logging.error(f"[Borderlands Gamble] Couldn't draw another player's spin: {ex!r}")
+                self._reported_failure = True
+
+    def hide(self) -> None:
+        if not self._visible:
+            return
+        self._visible = False
+        root = self._root()
+        if root is not None:
+            try:
+                root.SetVisibility(COLLAPSED)
+            except Exception as ex:  # noqa: BLE001
+                logging.dev_warning(f"[Borderlands Gamble] Couldn't hide other players' spins: {ex!r}")
+
+    def destroy(self) -> None:
+        root = self._root()
+        if root is not None:
+            try:
+                root.RemoveFromParent()
+            except Exception as ex:  # noqa: BLE001
+                logging.dev_warning(f"[Borderlands Gamble] Couldn't remove other players' spins: {ex!r}")
+        self._root = WeakPointer()
+        self._panels = []
+        self._cache.clear()
+        self._visible = False
+
+    def _apply(self, panel: _SpectatorPanel, spin: WatchedSpin) -> None:
+        self._cache.text(panel.title, f"{spin.name.upper()}  -  {spin.machine}")
+        self._cache.color(panel.title, GOLD)
+        for block, reel in zip(panel.symbols, spin.reels, strict=True):
+            r, g, b, a = SYMBOL_COLORS[reel.payline]
+            self._cache.text(block, SYMBOL_LABELS[reel.payline])
+            self._cache.color(block, (r, g, b, a * (1.0 if reel.stopped else SPINNING_SYMBOL_ALPHA)))
+        self._cache.text(panel.status, spin.status)
+        self._cache.color(panel.status, TONE_COLORS[spin.tone])
+
+    def _place(self, panel: _SpectatorPanel, point: tuple[float, float] | None, index: int) -> None:
+        screen, scale = self._screen, self._scale
+        width, height = SPECTATOR_W * scale, SPECTATOR_H * scale
+        if point is None:
+            x, y = DOCK_X * scale, (DOCK_Y + index * (SPECTATOR_H + DOCK_GAP)) * scale
+        else:
+            # Centred just above the head, but kept on screen
+            head_x, head_y = point[0] / screen.dpi, point[1] / screen.dpi
+            x = min(max(head_x - width / 2, 0.0), screen.width - width)
+            y = min(max(head_y - height, 0.0), screen.height - height)
+        position = (round(x), round(y))
+        self._cache.set(panel.canvas, "position", position, lambda p: panel.canvas.Slot.SetPosition(vec2(*p)))
+
+    def _ensure_built(self) -> UObject:
+        root = self._root()
+        if root is not None and self._panels:
+            return root
+        self.destroy()
+        pc = get_pc()
+        if pc is None:
+            raise RuntimeError("No player controller to draw for")
+        root, canvas, screen = new_root(pc, SPECTATOR_Z)
+        with removed_on_failure(root):
+            scale = screen.fit()
+            outer = Builder(root, canvas, (0.0, 0.0), 1.0)
+            panels = []
+            half_w, half_h = SPECTATOR_W / 2, SPECTATOR_H / 2
+            for _ in range(SPECTATOR_PANELS):
+                panel_canvas = outer.construct("/Script/UMG.CanvasPanel", COLLAPSED)
+                slot = panel_canvas.Slot
+                slot.SetAutoSize(False)
+                slot.SetSize(vec2(SPECTATOR_W * scale, SPECTATOR_H * scale))
+                slot.SetPosition(vec2(0.0, 0.0))
+                slot.SetZOrder(0)
+                ui = Builder(root, panel_canvas, (half_w * scale, half_h * scale), scale)
+                ui.box(-half_w - 2, -half_h - 2, SPECTATOR_W + 4, SPECTATOR_H + 4, GOLD, 0)
+                ui.box(-half_w, -half_h, SPECTATOR_W, SPECTATOR_H, SPECTATOR_BG, 1)
+                panels.append(
+                    _SpectatorPanel(
+                        canvas=panel_canvas,
+                        title=ui.text(0, -half_h + 20, 0.62, 2),
+                        symbols=(ui.text(-115, -2, 0.9, 2), ui.text(0, -2, 0.9, 2), ui.text(115, -2, 0.9, 2)),
+                        status=ui.text(0, half_h - 22, 0.66, 2),
+                    ),
+                )
+        self._root = WeakPointer(root)
+        self._panels = panels
+        self._screen = screen
+        self._scale = scale
+        self._cache.clear()
+        self._visible = False
         return root
 
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from .loot import DEFAULT_LOOT_TYPE, LOOT_TYPES, loot_type
 from .machines import BET_MULTIPLIERS, LUCK_PRESETS, MACHINES
 from .slots import SYMBOL_COLORS, Currency, describe_loot, exact_odds, format_amount, scale_prize
 
@@ -28,27 +29,28 @@ WHITE: RGBA = (0.92, 0.92, 0.92, 1.0)
 class MenuAction(Enum):
     PULL = "pull"
     MACHINE = "machine"
+    LOOT_NEXT = "loot_next"
+    LOOT_PREV = "loot_prev"
     BET_UP = "bet_up"
     BET_DOWN = "bet_down"
     LEAVE = "leave"
 
 
-# Keys the menu watches while it's open, by their Unreal names. The mod's keybinds can't be relied on
-# while a menu has focus, so these get polled instead.
+# Keys the menu watches while it's open, by their Unreal names. The SDK doesn't run keybinds while
+# the mouse cursor is showing, so these get polled instead. The game still sees them too, so they're
+# picked to do nothing harmful in game: no fire, grenade, action skill, or "use" buttons.
 MENU_KEYS: dict[str, MenuAction] = {
     "SpaceBar": MenuAction.PULL,
-    "Enter": MenuAction.PULL,
     "Gamepad_FaceButton_Bottom": MenuAction.PULL,
-    "Left": MenuAction.MACHINE,
-    "Right": MenuAction.MACHINE,
-    "Gamepad_DPad_Left": MenuAction.MACHINE,
-    "Gamepad_DPad_Right": MenuAction.MACHINE,
-    "Gamepad_FaceButton_Left": MenuAction.MACHINE,
+    "Left": MenuAction.LOOT_PREV,
+    "Right": MenuAction.LOOT_NEXT,
+    "Gamepad_DPad_Left": MenuAction.LOOT_PREV,
+    "Gamepad_DPad_Right": MenuAction.LOOT_NEXT,
     "Up": MenuAction.BET_UP,
     "Down": MenuAction.BET_DOWN,
     "Gamepad_DPad_Up": MenuAction.BET_UP,
     "Gamepad_DPad_Down": MenuAction.BET_DOWN,
-    "Gamepad_FaceButton_Top": MenuAction.BET_UP,
+    "Gamepad_FaceButton_Top": MenuAction.MACHINE,
     "Escape": MenuAction.LEAVE,
     "Gamepad_FaceButton_Right": MenuAction.LEAVE,
 }
@@ -129,6 +131,21 @@ def next_bet(bet: int, step: int) -> int:
     return BET_MULTIPLIERS[(BET_MULTIPLIERS.index(bet) + step) % len(BET_MULTIPLIERS)]
 
 
+def next_loot_type(key: str, step: int) -> str:
+    """Steps through the loot types, wrapping around."""
+    keys = list(LOOT_TYPES)
+    if key not in keys:
+        return DEFAULT_LOOT_TYPE
+    return keys[(keys.index(key) + step) % len(keys)]
+
+
+def drops_label(key: str) -> str:
+    """Names a loot type and what it adds to the price, e.g. "SHOTGUNS +50%"."""
+    chosen = loot_type(key)
+    extra = round((chosen.price - 1) * 100)
+    return chosen.name.upper() + (f"  +{extra}%" if extra else "")
+
+
 def next_machine(machine_key: str) -> str:
     """Steps to the next machine, wrapping around."""
     keys = list(MACHINES)
@@ -155,6 +172,7 @@ class MenuInfo:
     pull_label: str
     bet_label: str
     machine_label: str
+    drops_label: str
     wallet: str
     paytable_title: str
     paytable: tuple[PaytableRow, ...]
@@ -181,7 +199,7 @@ def _currency_name(currency: Currency) -> str:
     return "cash" if currency is Currency.CASH else "eridium"
 
 
-def _pays(machine: Machine, prize: Prize, *, bet: int, price: int | None) -> str:
+def _pays(machine: Machine, prize: Prize, *, bet: int, price: int | None, noun: str | None) -> str:
     """Describes what a paytable row pays at the given bet, in money if the price is known."""
     payout, eridium, loot = scale_prize(prize, price if price is not None else 0, bet)
     parts: list[str] = []
@@ -193,7 +211,7 @@ def _pays(machine: Machine, prize: Prize, *, bet: int, price: int | None) -> str
     if eridium:
         parts.append(f"{eridium:,} eridium")
     if loot:
-        parts.append(describe_loot(loot))
+        parts.append(describe_loot(loot, noun))
     return ", ".join(parts) if parts else "nothing"
 
 
@@ -224,6 +242,7 @@ def build_menu_info(
     machine_key: str,
     *,
     bet: int,
+    loot_type_key: str = DEFAULT_LOOT_TYPE,
     price: int | None,
     free_play: bool,
     luck_name: str,
@@ -240,6 +259,7 @@ def build_menu_info(
     Args:
         machine_key: The machine the player has picked.
         bet: The player's bet multiplier.
+        loot_type_key: What the player picked for loot wins to drop.
         price: What a pull costs at that bet, or None if it isn't known yet (a co-op client only
                learns the host's prices from its first pull).
         free_play: True if pulls cost nothing.
@@ -265,6 +285,7 @@ def build_menu_info(
     else:
         pull_label = "PULL THE LEVER"
 
+    noun = loot_type(loot_type_key).noun
     odds = _odds(machine_key, luck_name)
     rows = []
     for pattern, prize, probability in odds.rows:
@@ -274,7 +295,7 @@ def build_menu_info(
                 pattern.describe(),
                 color,
                 _one_in(probability),
-                _pays(machine, prize, bet=bet, price=None if free_play else price),
+                _pays(machine, prize, bet=bet, price=None if free_play else price, noun=noun),
             ),
         )
 
@@ -288,13 +309,14 @@ def build_menu_info(
     )
 
     hints = ["Space: pull" if pull_key is None else f"Space or {pull_key}: pull"]
-    hints += ["Left/Right: machine", "Up/Down: bet", "Esc: leave"]
+    hints += ["Left/Right: drops", "Up/Down: bet", "Esc: leave"]
 
     return MenuInfo(
         tagline=MACHINE_TAGLINES.get(machine_key, ""),
         pull_label=pull_label,
         bet_label=f"BET  x{bet}",
         machine_label=f"PLAY {other.name.upper()}",
+        drops_label=f"DROPS: {drops_label(loot_type_key)}",
         wallet=_wallet(wallet),
         paytable_title=f"PAYTABLE  (x{bet} bet)",
         paytable=tuple(rows),

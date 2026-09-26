@@ -7,16 +7,21 @@ they're short plain strings: `BLGMB|<protocol>|<type>|<fields...>`.
 Results only carry the line of symbols. Both sides share the same paytables, so the client works
 out the prize itself. That's also why a pull carries the mod version, and why the host refuses
 clients running a different version.
+
+A machine and the loot type the player picked travel together as `<machine>` or
+`<machine>.<loot type>`. Keeping the pull's shape the same as older versions means an older host
+still answers "versions don't match", rather than not understanding the pull at all.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .loot import DEFAULT_LOOT_TYPE
 from .machines import BET_MULTIPLIERS, MACHINES
 from .slots import Line, SpinResult, Symbol, scale_prize
 
-MOD_VERSION = "0.3.0"
+MOD_VERSION = "0.4.0"
 
 PREFIX = "BLGMB"
 PROTOCOL = 1
@@ -49,6 +54,7 @@ class Pull:
     machine_key: str
     bet: int
     mod_version: str = MOD_VERSION
+    loot_type: str = DEFAULT_LOOT_TYPE
 
 
 @dataclass(frozen=True)
@@ -88,7 +94,19 @@ class Pong:
     mod_version: str = MOD_VERSION
 
 
-Message = Pull | Settle | Ping | Result | Error | Pong
+@dataclass(frozen=True)
+class Show:
+    """Another player pulled the lever. Sent to everyone else, so they can watch the reels."""
+
+    player_id: int
+    machine_key: str
+    line: Line
+    bet: int
+    stake: int
+    loot_type: str = DEFAULT_LOOT_TYPE
+
+
+Message = Pull | Settle | Ping | Result | Error | Pong | Show
 
 
 def is_ours(text: str) -> bool:
@@ -99,22 +117,37 @@ def _clean(text: str) -> str:
     return " ".join(text.replace(SEPARATOR, "/").split())
 
 
+def _game(machine_key: str, loot_type: str) -> str:
+    return machine_key if loot_type == DEFAULT_LOOT_TYPE else f"{machine_key}.{loot_type}"
+
+
+def _split_game(value: str) -> tuple[str, str]:
+    machine_key, _, loot_type = value.partition(".")
+    if not machine_key or (loot_type and not loot_type.replace("_", "").isalnum()):
+        raise ProtocolError(f"Bad machine '{value}'")
+    return machine_key, loot_type or DEFAULT_LOOT_TYPE
+
+
+def _line_codes(line: Line) -> str:
+    return "".join(SYMBOL_CODES[symbol] for symbol in line)
+
+
 def encode(message: Message) -> str:
     """Converts a message to the string sent over the wire."""
     match message:
         case Pull():
-            fields = ["pull", message.request_id, message.machine_key, message.bet, message.mod_version]
+            game = _game(message.machine_key, message.loot_type)
+            fields = ["pull", message.request_id, game, message.bet, message.mod_version]
         case Settle():
             fields = ["settle", message.request_id]
         case Ping():
             fields = ["ping", message.nonce]
         case Result():
-            line = "".join(SYMBOL_CODES[symbol] for symbol in message.line)
             fields = [
                 "result",
                 message.request_id,
                 message.machine_key,
-                line,
+                _line_codes(message.line),
                 message.bet,
                 message.stake,
                 message.charged,
@@ -125,6 +158,15 @@ def encode(message: Message) -> str:
             fields[-1] = _clean(message.text)[: MAX_LENGTH - len(head)]
         case Pong():
             fields = ["pong", message.nonce, message.mod_version]
+        case Show():
+            fields = [
+                "show",
+                message.player_id,
+                _game(message.machine_key, message.loot_type),
+                _line_codes(message.line),
+                message.bet,
+                message.stake,
+            ]
 
     text = SEPARATOR.join(str(field) for field in [PREFIX, PROTOCOL, *fields])
     if len(text) > MAX_LENGTH:
@@ -176,7 +218,7 @@ def decode(text: str) -> Message | None:
         raise ProtocolError(f"Unsupported protocol in '{text}'")
 
     kind, fields = parts[2], parts[3:]
-    expected = {"pull": 4, "settle": 1, "ping": 1, "result": 6, "error": 2, "pong": 2}
+    expected = {"pull": 4, "settle": 1, "ping": 1, "result": 6, "error": 2, "pong": 2, "show": 5}
     if kind not in expected:
         raise ProtocolError(f"Unknown message type '{kind}'")
     if len(fields) != expected[kind]:
@@ -186,7 +228,8 @@ def decode(text: str) -> Message | None:
         case "pull":
             # Machine and bet are checked by the casino, so that a client on another version gets a
             # proper "versions don't match" reply rather than silence
-            return Pull(_int(fields[0]), fields[1], _int(fields[2], minimum=1), fields[3])
+            machine_key, loot_type = _split_game(fields[1])
+            return Pull(_int(fields[0]), machine_key, _int(fields[2], minimum=1), fields[3], loot_type)
         case "settle":
             return Settle(_int(fields[0]))
         case "ping":
@@ -202,6 +245,16 @@ def decode(text: str) -> Message | None:
             )
         case "error":
             return Error(_int(fields[0]), fields[1])
+        case "show":
+            machine_key, loot_type = _split_game(fields[1])
+            return Show(
+                player_id=_int(fields[0]),
+                machine_key=_machine(machine_key),
+                line=_line(fields[2]),
+                bet=_bet(fields[3]),
+                stake=_int(fields[4]),
+                loot_type=loot_type,
+            )
         case _:
             return Pong(_int(fields[0]), fields[1])
 
@@ -210,7 +263,11 @@ def to_result(request_id: int, spin: SpinResult, charged: int) -> Result:
     return Result(request_id, spin.machine_key, spin.line, spin.bet, spin.stake, charged)
 
 
-def to_spin(result: Result) -> SpinResult:
+def to_show(player_id: int, spin: SpinResult, loot_type: str) -> Show:
+    return Show(player_id, spin.machine_key, spin.line, spin.bet, spin.stake, loot_type)
+
+
+def to_spin(result: Result | Show) -> SpinResult:
     """Rebuilds the full spin from a result, using the (shared) paytables."""
     machine = MACHINES[result.machine_key]
     prize = machine.evaluate(result.line)

@@ -15,7 +15,7 @@ import unrealsdk
 from mods_base import ENGINE, get_pc
 from unrealsdk import logging
 from unrealsdk.hooks import Block, Type, add_hook, prevent_hooking_direct_calls, remove_hook
-from unrealsdk.unreal import FGbxDefPtr, UObject, WeakPointer
+from unrealsdk.unreal import IGNORE_STRUCT, FGbxDefPtr, UObject, WeakPointer
 
 from . import loot, protocol
 from .slots import Currency
@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from unrealsdk.unreal import BoundFunction, WrappedStruct
+
+    from .cabinets import Body
 
 CURRENCY_DEF_PATHS = ("/Script/GbxGame.GbxCurrencyDef", "/Script/OakGame.GbxCurrencyDef")
 EXPERIENCE_DEF_PATHS = ("/Script/GbxGame.GbxExperienceDef", "/Script/OakGame.GbxExperienceDef")
@@ -39,6 +41,9 @@ VENDING_MACHINE_CLASS = "OakVendingMachine"
 SERVER_RPC = "/Script/Engine.PlayerController:ServerExec"
 CLIENT_RPC = "/Script/Engine.PlayerController:ClientMessage"
 COOP_HOOK_ID = "borderlands_gamble.coop"
+
+# Standing this close to one of the mod's slot machines, loot drops at its feet.
+DROP_NEAR_MACHINE = 400.0
 
 
 def is_template(obj: UObject) -> bool:
@@ -76,6 +81,66 @@ def local_player() -> UObject | None:
     except (IndexError, AttributeError):
         # No local player yet, e.g. mid load
         return None
+
+
+def same_object(a: UObject | None, b: UObject | None) -> bool:
+    """Checks if two wrappers are the same game object. The SDK can make several for one object."""
+    if a is None or b is None:
+        return a is b
+    return a._get_address() == b._get_address()
+
+
+def player_id(player: UObject) -> int | None:
+    """Gets a player's id, which every game in a co-op session agrees on, from their controller."""
+    state = player.PlayerState
+    if state is None:
+        return None
+    try:
+        return int(state.GetPlayerId())
+    except AttributeError:
+        return int(state.PlayerId)
+
+
+def players() -> list[tuple[int, str, UObject | None, UObject]]:
+    """Gets every player in the session, as (id, name, pawn, player state)."""
+    world = ENGINE.GameViewport.World
+    if world is None or world.GameState is None:
+        return []
+    found = []
+    for state in world.GameState.PlayerArray:
+        if state is None:
+            continue
+        try:
+            state_id = int(state.GetPlayerId())
+        except AttributeError:
+            state_id = int(state.PlayerId)
+        found.append((state_id, str(state.GetPlayerName()), state.PawnPrivate, state))
+    return found
+
+
+def other_controllers(exclude: UObject | None = None) -> list[UObject]:
+    """On the host, gets the controllers of the other players in the session, e.g. to message them."""
+    controllers = []
+    for _, _, pawn, state in players():
+        try:
+            pc = state.GetPlayerController()
+        except AttributeError:
+            pc = None
+        if pc is None and pawn is not None:
+            pc = pawn.Owner
+        if pc is None or pc.IsLocalController() or same_object(pc, exclude):
+            continue
+        controllers.append(pc)
+    return controllers
+
+
+def screen_point(pc: UObject, x: float, y: float, z: float) -> tuple[float, float] | None:
+    """Gets where a point in the world appears on screen, in pixels. None if it's behind the camera."""
+    location = unrealsdk.make_struct("Vector", X=x, Y=y, Z=z)
+    on_screen, point = pc.ProjectWorldLocationToScreen(location, IGNORE_STRUCT, False)
+    if not on_screen:
+        return None
+    return float(point.X), float(point.Y)
 
 
 def is_host() -> bool:
@@ -119,12 +184,11 @@ class BL4Backend:
     one, which is what lets the host's casino charge and pay co-op partners.
     """
 
-    def __init__(
-        self, slot_machines: Callable[[], Iterable[tuple[float, float, float]]] | None = None
-    ) -> None:
+    def __init__(self, slot_machines: Callable[[], Iterable[Body]] | None = None) -> None:
         """
         Args:
-            slot_machines: Gets where the mod's own slot machines stand, which count as machines too.
+            slot_machines: Gets the mod's own slot machines, which count as machines too, and pay
+                           out at their feet.
         """
         self.slot_machines = slot_machines
         self._currency_struct: UObject | None = None
@@ -198,8 +262,9 @@ class BL4Backend:
         max_dist_sq = radius * radius
 
         if self.slot_machines is not None:
-            for x, y, z in self.slot_machines():
-                if (here.X - x) ** 2 + (here.Y - y) ** 2 + (here.Z - z) ** 2 <= max_dist_sq:
+            for body in self.slot_machines():
+                z = (body.bottom + body.top) / 2
+                if (here.X - body.x) ** 2 + (here.Y - body.y) ** 2 + (here.Z - z) ** 2 <= max_dist_sq:
                     return True
 
         for machine in unrealsdk.find_all(VENDING_MACHINE_CLASS, exact=False):
@@ -253,12 +318,29 @@ class BL4Backend:
             raise RuntimeError("Player isn't in the world")
 
         loc = pawn.K2_GetActorLocation()
-        yaw = float(pawn.K2_GetActorRotation().Yaw)
-        x, y, z = loot.drop_position((loc.X, loc.Y, loc.Z), yaw, index, count)
+        here = (loc.X, loc.Y, loc.Z)
+        machine = self._slot_machine_near(here)
+        if machine is not None:
+            # The machine pays out on the floor in front of it, clear of it
+            x, y, z = loot.drop_position_near((machine.x, machine.y), machine.radius, here, index, count)
+        else:
+            yaw = float(pawn.K2_GetActorRotation().Yaw)
+            x, y, z = loot.drop_position(here, yaw, index, count)
 
         transform = pawn.K2_GetActorTransform()
         transform.Translation = unrealsdk.make_struct("Vector", X=x, Y=y, Z=z)
         self._item_pool_store().SpawnInventoryFromItemPool(world, transform, level, pool)
+
+    def _slot_machine_near(self, here: tuple[float, float, float]) -> Body | None:
+        if self.slot_machines is None:
+            return None
+        nearby = [
+            body
+            for body in self.slot_machines()
+            if (here[0] - body.x) ** 2 + (here[1] - body.y) ** 2 <= DROP_NEAR_MACHINE**2
+            and body.bottom - 200 <= here[2] <= body.top + 200
+        ]
+        return min(nearby, key=lambda b: (here[0] - b.x) ** 2 + (here[1] - b.y) ** 2, default=None)
 
     # ==============================================================================================
     # Diagnostics

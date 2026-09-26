@@ -15,6 +15,7 @@ from borderlands_gamble.protocol import (
     Pull,
     Result,
     Settle,
+    Show,
     decode,
     encode,
 )
@@ -28,12 +29,15 @@ class RoundTripTests(unittest.TestCase):
         messages = [
             Pull(1, "cash", 10),
             Pull(987654, "eridium", 1, "9.9.9"),
+            Pull(2, "cash", 5, MOD_VERSION, "class_mods"),
             Settle(42),
             Ping(123456),
             Result(3, "cash", (S.VAULT, S.SKULL, S.EPIC), 5, 13000, 13000),
             Result(4, "eridium", (S.LEGENDARY,) * 3, 1, 10, 0),
             Error(5, "Not enough cash: a pull costs $2,600."),
             Pong(99),
+            Show(256, "cash", (S.VAULT,) * 3, 10, 26000),
+            Show(2_147_483_647, "eridium", (S.SKULL, S.RARE, S.EPIC), 1, 15, "assault_rifles"),
         ]
         for message in messages:
             with self.subTest(message=message):
@@ -52,6 +56,24 @@ class RoundTripTests(unittest.TestCase):
         decoded = decode(text)
         self.assertIsInstance(decoded, Error)
         self.assertTrue(decoded.text.startswith("bad / news here"))
+
+    def test_loot_type_rides_with_the_machine(self) -> None:
+        # So a pull keeps the same number of fields as older versions sent
+        self.assertEqual(
+            encode(Pull(1, "cash", 2, "0.4.0", "shotguns")), "BLGMB|1|pull|1|cash.shotguns|2|0.4.0"
+        )
+        self.assertEqual(encode(Pull(1, "cash", 2, "0.4.0")), "BLGMB|1|pull|1|cash|2|0.4.0")
+        # Older clients' pulls still decode, as "anything"
+        self.assertEqual(decode("BLGMB|1|pull|1|cash|2|0.3.0"), Pull(1, "cash", 2, "0.3.0", "any"))
+
+    def test_shows_rebuild_the_spin(self) -> None:
+        rng = random.Random(9)
+        for machine in MACHINES.values():
+            original = spin(machine, rng, stake=39, bet=2)
+            message = decode(encode(protocol.to_show(300, original, "shields")))
+            assert isinstance(message, Show)
+            self.assertEqual((message.player_id, message.loot_type), (300, "shields"))
+            self.assertEqual(protocol.to_spin(message), original)
 
     def test_results_rebuild_the_spin(self) -> None:
         rng = random.Random(5)
@@ -76,6 +98,11 @@ class DecodeTests(unittest.TestCase):
             "BLGMB|1|ping|-1",
             "BLGMB|1|settle|abc",
             "BLGMB|1|pull|1|cash|0|0.2.0",
+            "BLGMB|1|pull|1|.shotguns|1|0.4.0",
+            "BLGMB|1|pull|1|cash.sho tguns|1|0.4.0",
+            "BLGMB|1|show|1|roulette|VVV|1|10",
+            "BLGMB|1|show|x|cash|VVV|1|10",
+            "BLGMB|1|show|1|cash|VVV|1",
             "BLGMB|1|result|1|roulette|VVV|1|10|10",
             "BLGMB|1|result|1|cash|VVX|1|10|10",
             "BLGMB|1|result|1|cash|VV|1|10|10",

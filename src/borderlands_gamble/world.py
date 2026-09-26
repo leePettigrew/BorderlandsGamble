@@ -7,8 +7,10 @@ the game never offers to "use" them. Instead, the mod works out when the player 
 and handles the use key itself (see `sdk_mod.py`).
 
 Each player's game puts up its own copies, and they're never replicated, so co-op partners don't see
-double. The APIs used are the same ones Matt's ActorScriptDeployer uses to spawn visual copies of
-game actors - see `docs/game-api.md`.
+double. They have no collision, like ActorScriptDeployer's visual copies: the host's game decides
+where everyone can walk, and a partner may not have the same machines (e.g. ones placed by hand), so
+solid copies could turn into invisible walls. The APIs used are the same ones Matt's
+ActorScriptDeployer uses to spawn visual copies of game actors - see `docs/game-api.md`.
 """
 
 from __future__ import annotations
@@ -51,6 +53,13 @@ SIGN_COLOR = (255, 190, 40)
 SIGN_SIZE = 42.0
 SIGN_GAP = 30.0
 
+# ETraceTypeQuery::TraceTypeQuery1, the visibility channel
+VISIBILITY_TRACE = 0
+# Hits closer than this to the camera are the player's own arms or gun, not a wall.
+TRACE_SKIP_NEAR = 50.0
+# Anything hit this far in front of a slot machine's surface is between it and the player.
+TRACE_MARGIN = 40.0
+
 # Sanity limits on a vending machine's bounding box (half sizes), in case it includes something
 # large like a trigger volume.
 HORIZONTAL_EXTENT = (20.0, 150.0)
@@ -90,6 +99,59 @@ def view_ray(pc: UObject) -> tuple[Vector, Vector] | None:
     except Exception:  # noqa: BLE001 - e.g. mid load
         return None
     return (loc.X, loc.Y, loc.Z), cabinets.forward(rot.Pitch, rot.Yaw)
+
+
+_reported_trace_failure = False
+
+
+def view_blocked(pc: UObject, origin: Vector, direction: Vector, distance: float) -> bool:
+    """
+    Checks for a wall, or anything else solid, between the camera and a point along its view.
+
+    Args:
+        pc: The player looking.
+        origin: The camera's location.
+        direction: The unit vector it looks along.
+        distance: How far along the view the point is.
+    Returns:
+        True if something's in the way. False if the view is clear, or it couldn't be checked.
+    """
+    global _reported_trace_failure
+    end = distance - TRACE_MARGIN
+    if end <= TRACE_SKIP_NEAR:
+        return False
+
+    def point(along: float) -> Any:
+        return unrealsdk.make_struct(
+            "Vector",
+            X=origin[0] + direction[0] * along,
+            Y=origin[1] + direction[1] * along,
+            Z=origin[2] + direction[2] * along,
+        )
+
+    try:
+        library = unrealsdk.find_class("KismetSystemLibrary").ClassDefaultObject
+        ignore = [pc.Pawn] if pc.Pawn is not None else []
+        hit, _ = library.LineTraceSingle(
+            ENGINE.GameViewport.World,
+            point(TRACE_SKIP_NEAR),
+            point(end),
+            VISIBILITY_TRACE,
+            False,
+            ignore,
+            0,
+            IGNORE_STRUCT,
+            True,
+            IGNORE_STRUCT,
+            IGNORE_STRUCT,
+            0.0,
+        )
+    except Exception as ex:  # noqa: BLE001 - better a prompt through a wall than no prompt at all
+        if not _reported_trace_failure:
+            _reported_trace_failure = True
+            logging.dev_warning(f"[Borderlands Gamble] Couldn't check for walls: {ex!r}")
+        return False
+    return bool(hit)
 
 
 def _bounds(actor: UObject) -> tuple[Vector | None, Vector]:
@@ -276,6 +338,7 @@ def _spawn_part(part: _Part, location: Vector, rotation: Vector) -> UObject | No
     if actor is None:
         return None
     try:
+        actor.SetActorEnableCollision(False)
         component = getattr(actor, component_name)
         _set_mesh(part.kind, component, part.mesh)
         _copy_materials(part.component, component)
@@ -390,39 +453,47 @@ class SlotMachines:
     def cabinets(self) -> list[Cabinet[CabinetActors]]:
         return self.keeper.cabinets
 
-    def update(self) -> None:
-        """Rescans the vending machines, and puts up or takes down slot machines to match."""
+    def update(self) -> bool:
+        """
+        Rescans the vending machines, and puts up or takes down slot machines to match.
+
+        Returns:
+            True if there may be more to put up, so it's worth updating again soon.
+        """
         pc = bl4.local_player()
         if pc is None or pc.Pawn is None:
-            return
+            return False
         map_name = current_map()
         if map_name is None:
-            return
+            return False
         scanned = scan_vending_machines()
         self._sources = {record.key: WeakPointer(actor) for actor, record in scanned}
         self.machines = [record for _, record in scanned]
-        self.keeper.update(map_name, self.machines, self.overrides())
+        return self.keeper.update(map_name, self.machines, self.overrides())
 
     def clear(self) -> None:
         """Takes down every slot machine."""
         self.keeper.clear()
 
     def aimed_at(self) -> Cabinet[CabinetActors] | None:
-        """Gets the slot machine the player is aiming at, if any."""
+        """Gets the slot machine the player is aiming at, if any, and not through a wall."""
         pc = bl4.local_player()
         if pc is None or not self.keeper.cabinets:
             return None
         ray = view_ray(pc)
         if ray is None:
             return None
-        return cabinets.aimed_at(
+        found = cabinets.aim(
             *ray,
             ((cabinet, cabinet.body) for cabinet in self.keeper.cabinets),
             (machine.body for machine in self.machines),
         )
+        if found is None or view_blocked(pc, *ray, found[1]):
+            return None
+        return found[0]
 
-    def spots(self) -> list[tuple[float, float, float]]:
-        return [(c.spot.x, c.spot.y, c.spot.z) for c in self.keeper.cabinets]
+    def bodies(self) -> list[cabinets.Body]:
+        return [cabinet.body for cabinet in self.keeper.cabinets]
 
     def _spawn(self, source: VendingMachine, spot: Spot) -> CabinetActors | None:
         ptr = self._sources.get(source.key)

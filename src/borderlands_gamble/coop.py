@@ -57,7 +57,9 @@ def handle_host_message(
                 ),
             )
         case protocol.Pull():
-            outcome = casino.pull(player, message.request_id, message.machine_key, message.bet)
+            outcome = casino.pull(
+                player, message.request_id, message.machine_key, message.bet, message.loot_type
+            )
             if isinstance(outcome, str):
                 reply(protocol.encode(protocol.Error(message.request_id, outcome)))
             else:
@@ -77,6 +79,7 @@ def handle_client_message(
     text: str,
     on_pong: Callable[[protocol.Pong], None],
     log: Callable[[str], None],
+    on_show: Callable[[protocol.Show], None] | None = None,
 ) -> bool:
     """
     Handles a message the host sent to this client.
@@ -86,6 +89,7 @@ def handle_client_message(
         text: The raw message.
         on_pong: Called with the host's reply to a ping.
         log: Where to log problems.
+        on_show: Called when another player pulled, so we can watch.
     Returns:
         True if the message was one of ours (whether or not it could be handled).
     """
@@ -104,6 +108,9 @@ def handle_client_message(
             controller.receive_error(message.request_id, message.text)
         case protocol.Pong():
             on_pong(message)
+        case protocol.Show():
+            if on_show is not None:
+                on_show(message)
         case _:
             log(f"Ignoring a client-bound {type(message).__name__} from the host")
     return True

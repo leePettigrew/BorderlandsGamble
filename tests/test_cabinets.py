@@ -170,6 +170,37 @@ class PlacementTests(unittest.TestCase):
             for m in machines:
                 self.assertGreaterEqual(math.dist((spot.x, spot.y), (m.x, m.y)), 2 * 60)
 
+    def test_aisle_isnt_a_row(self) -> None:
+        # Two machines facing each other across an aisle: the spots past "either end" would be
+        # behind them, so only spots beside them count
+        aisle = [machine("a", 0, 0, yaw=0), machine("b", 300, 0, yaw=180)]
+        spots = {(round(s.x), round(s.y)) for _, s in candidate_spots(aisle)}
+        self.assertEqual(spots, {(0, 160), (0, -160), (300, 160), (300, -160)})
+
+    def test_every_spot_stands_beside_its_machine(self) -> None:
+        rng = random.Random(7)
+        for _ in range(300):
+            group = [
+                machine(
+                    f"m{i}", rng.uniform(-600, 600), rng.uniform(-600, 600), yaw=rng.choice((0, 90, 180, 270))
+                )
+                for i in range(rng.randint(1, 4))
+            ]
+            for source, spot in candidate_spots(group):
+                # Straight out of one of its sides, never diagonally into a wall
+                rx, ry = cabinets._right(source.yaw)
+                dx, dy = spot.x - source.x, spot.y - source.y
+                self.assertAlmostEqual(abs(dx * rx + dy * ry), 2 * source.half_width + GAP, places=6)
+                self.assertAlmostEqual(spot.yaw, source.yaw)
+                for other in group:
+                    self.assertGreaterEqual(math.dist((spot.x, spot.y), (other.x, other.y)) + 1e-6, 120)
+
+    def test_l_shaped_rows(self) -> None:
+        corner = [machine("a", 0, 0), machine("b", 0, 130), machine("c", -200, 300, yaw=90)]
+        spots = [(round(s.x), round(s.y)) for _, s in candidate_spots(corner)]
+        self.assertIn((0, -160), spots)
+        self.assertNotIn((-93, 290), spots)
+
     def test_placement_ignores_actor_names(self) -> None:
         # In co-op each player's game might name the same machines differently
         machines = row("m", 3)
@@ -270,10 +301,10 @@ class OverridesTests(unittest.TestCase):
         overrides.remove("Map", Spot(0, 0, 0), automatic=True)
         overrides.remove("Map", Spot(1000, 0, 0), automatic=True)
 
-        # Adding a machine near a removed automatic one undoes that removal
+        # Adding a machine doesn't bring back removed ones
         added = overrides.add("Map", Spot(50.04, 0, 0, 0))
         self.assertEqual(added, Spot(50, 0, 0, 0))
-        self.assertEqual(overrides.removed["Map"], [Spot(1000, 0, 0)])
+        self.assertEqual(overrides.removed["Map"], [Spot(0, 0, 0), Spot(1000, 0, 0)])
 
         overrides.remove("Map", added, automatic=False)
         self.assertNotIn("Map", overrides.added)
@@ -375,17 +406,36 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual([c.automatic for c in self.keeper.cabinets], [True])
 
     def test_hand_placed_waits_for_a_machine_to_copy(self) -> None:
-        self.overrides.add("Map", Spot(0, 0, 0))
+        self.overrides.add("Map", Spot(-500, 0, 0))
         self.keeper.update("Map", [], self.overrides)
         self.assertEqual(self.keeper.cabinets, [])
         self.keeper.update("Map", row("a", 1), self.overrides)
-        self.assertEqual(len(self.keeper.cabinets), 1)
+        self.assertEqual([c.spot for c in self.keeper.cabinets if not c.automatic], [Spot(-500, 0, 0)])
 
-    def test_hand_placed_serves_its_group(self) -> None:
+    def test_hand_placed_machines_are_extras(self) -> None:
+        # Whichever order they go up in, e.g. after reloading, a row keeps its own slot machine
         safehouse = row("a", 2)
+        self.keeper.update("Map", safehouse, self.overrides)
         self.overrides.add("Map", Spot(-300, 0, 0))
         self.keeper.update("Map", safehouse, self.overrides)
-        self.assertEqual([c.automatic for c in self.keeper.cabinets], [False])
+        before = sorted((c.automatic, c.spot) for c in self.keeper.cabinets)
+
+        reloaded = self.world.keeper()
+        reloaded.update("Map", safehouse, self.overrides)
+        self.assertEqual(sorted((c.automatic, c.spot) for c in reloaded.cabinets), before)
+        self.assertEqual([automatic for automatic, _ in before], [False, True])
+
+    def test_automatic_ones_make_way_for_hand_placed_ones(self) -> None:
+        safehouse = row("a", 2)
+        first, second = (p.spot for p in plan_placements(safehouse, [], [])[0])
+        self.keeper.update("Map", safehouse, self.overrides)
+        self.assertEqual([c.spot for c in self.keeper.cabinets], [first])
+
+        self.overrides.add("Map", Spot(first.x + 20, first.y, first.z, first.yaw))
+        self.keeper.update("Map", safehouse, self.overrides)
+        self.keeper.update("Map", safehouse, self.overrides)
+        automatic = [c.spot for c in self.keeper.cabinets if c.automatic]
+        self.assertEqual(automatic, [second])
 
     def test_failed_spots_fall_back(self) -> None:
         safehouse = row("a", 2)

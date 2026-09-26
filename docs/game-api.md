@@ -61,8 +61,17 @@ py print(pc.PlayerState.BP_GetExperienceLevel(xp), pc.HasAuthority())
 | World | `ENGINE.GameViewport.World` | MSBT, [EncoreTweaks](https://github.com/RedxYeti/yeti-bl4-sdk) |
 | Pool names | e.g. `itempool_guns_03_rare`, `itempool_sr_05_legendary`, from the game's own data (v1.10 / build 25234898) | MSBT's `item_pools.json` catalog |
 
-The prize pools per tier are in [`loot.py`](../src/borderlands_gamble/loot.py). There's no combined
-legendary gun pool, so legendaries roll a weapon type first.
+The prize pools per tier, and per **Drops** choice, are in
+[`loot.py`](../src/borderlands_gamble/loot.py). There's no combined legendary gun pool, so
+legendaries roll a weapon type first. Each weapon type, shields, grenades (`grenade_gadgets`),
+repkits, class mods, and enhancements all have their own rare, epic, and legendary pools.
+
+At one of the mod's slot machines, loot lands on the floor in front of it, on the side facing the
+player. Anywhere else, it lands in front of the player.
+
+**To check in co-op:** BL4's own loot is per player, so each player normally only sees their own
+drops. These are spawned by the host straight from the item pools, with no player attached, so both
+players should see them. That hasn't been tested yet.
 
 ```
 py store = list(unrealsdk.find_all("NexusConfigStoreItemPool", False))[-1]
@@ -97,9 +106,11 @@ for its visual copies of game actors.
 | Spawn a plain actor | `GameplayStatics.BeginDeferredActorSpawnFromClass(world, cls, transform, 1, None, 1)`, then `FinishSpawningActor(actor, transform, 1)`. `SetReplicates(False)` in between, since every player's game builds its own copy | ASD `_spawn_actor_deferred` |
 | Give it a mesh | `StaticMeshActor`: `StaticMeshComponent.SetMobility(2)` (movable), then `SetStaticMesh(mesh)`. `SkeletalMeshActor`: `SkeletalMeshComponent.SetSkeletalMeshAsset(mesh)`. Then `SetMaterial(i, material)` for each slot | ASD `_spawn_generic_skeletal_duplicate` |
 | The SLOTS sign | `/Script/Engine.TextRenderActor`, its `TextRender` component's `K2_SetText`, `SetTextRenderColor`, `SetWorldSize` | Unreal built-in |
+| No collision | `SetActorEnableCollision(False)` on each part, as ASD's visual copies do. The host's game decides where everyone can walk, so solid copies could block a partner who doesn't have the same machine | ASD `_freeze_visual_actor` |
 | Take one down | `K2_DestroyActor()` | ASD |
 | Which map | `GameplayStatics.GetCurrentLevelName(world, True)`, to store hand placed machines against | Unreal built-in |
 | What you're aiming at | `pc.PlayerCameraManager.GetCameraLocation()` and `GetCameraRotation()`, tested against each machine's rough shape (an upright cylinder) | Unreal built-ins |
+| Walls in the way | `KismetSystemLibrary.LineTraceSingle(world, start, end, 0, False, [pawn], 0, IGNORE_STRUCT, True, IGNORE_STRUCT, IGNORE_STRUCT, 0.0)` on the visibility channel, from half a metre past the camera to just short of the machine. If it can't run, the prompt still works, through walls | Unreal built-in |
 
 ```
 py m = [m for m in unrealsdk.find_all("OakVendingMachine", False) if not str(m.Name).startswith("Default__")][0]
@@ -137,6 +148,11 @@ The menu is built like the overlay, then made clickable the way
 | Cursor and focus | `pc.bShowMouseCursor = True`, `WidgetBlueprintLibrary.SetInputMode_GameAndUIEx(pc, button, 0, False, False)`. `SetInputMode_GameOnly(pc, True)` undoes it | Matt's BL4 Mods Menu |
 | Stop the player moving | `pc.SetIgnoreMoveInput(True)`, `SetIgnoreLookInput(True)`, `pc.bBlockInput = True`. `ResetIgnoreMoveInput()` and `ResetIgnoreLookInput()` undo it | Matt's BL4 Mods Menu |
 | Hide the HUD | The console command `gbx.ui.view.stateadd CINEMATIC` (`stateremove` to undo), run with `KismetSystemLibrary.ExecuteConsoleCommand(pc, command, pc)` | Matt's BL4 Mods Menu |
+| Keep focus on PULL | Every other button gets `IsFocusable = False` before it's added, and PULL is re-focused after each click. Slate presses the focused button on Space, Enter, or A | Unreal built-in (`UButton::IsFocusable`, only read when the button is built) |
+
+After a map change, or quitting to the title screen, the widgets and the controller the menu changed
+are gone. The menu then only undoes the `CINEMATIC` UI state, and never touches the old widgets or
+the new controller's input.
 
 If the menu ever gets stuck open, `gamble_menu` in the console closes it and gives back control.
 
@@ -153,16 +169,34 @@ Outgoing calls are wrapped in `unrealsdk.hooks.prevent_hooking_direct_calls()`, 
 don't see them. `gamble_coop_test` checks the whole round trip in a real session. See
 [coop.md](coop.md).
 
+## Watching other players
+
+| What | API | Proven by |
+|---|---|---|
+| Everyone in the session | `ENGINE.GameViewport.World.GameState.PlayerArray`: player states, with `GetPlayerName()` and `PawnPrivate` (their character) | [EncoreTweaks](https://github.com/RedxYeti/yeti-bl4-sdk) |
+| Who's who | `GetPlayerId()` (or the `PlayerId` property) on a player state. Every game in the session agrees on it, so it's what `show` messages carry | Unreal built-in |
+| A partner's controller, on the host | `GetPlayerController()` on their player state, or `PawnPrivate.Owner` | Unreal built-in, EncoreTweaks |
+| Where their head is on screen | `pc.ProjectWorldLocationToScreen(location, IGNORE_STRUCT, False)`, which returns `(on screen, point in pixels)` | Unreal built-in |
+
+```
+py print([(p.GetPlayerId(), p.GetPlayerName()) for p in ENGINE.GameViewport.World.GameState.PlayerArray])
+```
+
 ## Keys
 
 The menu opens with **F8** next to any machine (MSBT uses F7, F10, and F11, and no other mod we
 checked uses F8), and with **E** while you aim at one of the mod's slot machines. The SDK's keybinds
 hook the game's own input handling (`UGbxEnhancedPlayerInput::InputKey`), and a keybind can return
-`Block` to keep a key press from the game. The mod only does that for E while you're aiming at a
-slot machine (which the game has nothing to use on anyway) or have its menu open. Anywhere else, E
-goes straight to the game. In the menu, both keys are also polled directly, like the menu's other
-keys, in case keybinds don't fire while it has focus. Rebind either key in the mods menu if it clashes with anything. If keybinds ever stop working
-after a patch, the `gamble_menu` and `gamble_spin` console commands do the same things.
+`Block` to keep a key press from the game. The mod only does that for E, and only while you're aiming
+at one of its slot machines, which the game has nothing to use on anyway. Anywhere else, E goes
+straight to the game.
+
+The SDK skips keybinds entirely while the mouse cursor is showing (it checks the controller's
+`bShowMouseCursor`), which it always is in the menu. So the menu polls its keys, F8 and E included,
+and can't keep them from the game. That's why it only uses keys that don't do anything harmful in
+game, and why E only closes a menu that E opened. Rebind either key in the mods menu if it clashes
+with anything. If keybinds ever stop working after a patch, the `gamble_menu` and `gamble_spin`
+console commands do the same things.
 
 ## Research: the game's own use prompt
 

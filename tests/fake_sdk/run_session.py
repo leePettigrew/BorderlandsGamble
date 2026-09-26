@@ -96,6 +96,8 @@ def play_in_the_world(
     assert door.location == (1170.0, 2390.0, 360.0), door.location
     assert door.SkeletalMeshComponent.mesh.Name == "SK_VendingMachine_Ammo_2_Door"
     assert all(a.TextRender.text == "SLOTS" for a in game.live_actors("TextRenderActor"))
+    # No collision, so partners with different machines can't hit invisible walls
+    assert not any(a.collision for a in game.live_actors() if a.class_name != "TextRenderActor")
     assert not any(
         a.StaticMeshComponent.mesh.Name == "SM_LOD_Proxy" for a in game.live_actors("StaticMeshActor")
     )
@@ -120,6 +122,15 @@ def play_in_the_world(
     assert sdk_mod.use_machine_keybind.callback() is None
     assert prompt_root.visibility == 1
 
+    # A wall between the player and the slot machine: no prompt, and E does its normal thing
+    game.walls = [(1100.0, 1110.0, 2300.0, 2500.0)]
+    pc.PlayerCameraManager.look_at(1200.0, 2390.0, 400.0)
+    tick(0.2)
+    assert prompt_root.visibility == 1, "no prompt through walls"
+    assert sdk_mod.use_machine_keybind.callback() is None
+    assert game.traces > 0
+    game.walls = []
+
     # ---- Pressing E opens the menu ----
     pc.PlayerCameraManager.look_at(1200.0, 2390.0, 400.0)
     assert sdk_mod.use_machine_keybind.callback() is hooks.Block, "E should be kept from the game"
@@ -138,6 +149,10 @@ def play_in_the_world(
     for text in ("ERIDIUM SLOTS", "PULL THE LEVER  (20 eridium)", "PAYTABLE  (x2 bet)", "3x VAULT", "LEAVE"):
         assert text in shown, text
     assert any(text.startswith("Cash $") for text in shown)
+
+    # Only PULL can take keyboard focus, so Space and Enter always pull
+    assert not hasattr(buttons[MenuAction.PULL].hit, "IsFocusable")
+    assert all(buttons[a].hit.IsFocusable is False for a in buttons if a is not MenuAction.PULL)
 
     def click(action: MenuAction) -> None:
         button = buttons[action].hit
@@ -172,6 +187,16 @@ def play_in_the_world(
     press("Down")
     assert sdk_mod.player_settings().bet == 2
 
+    # Drops: pick what loot wins drop, for a price
+    click(MenuAction.LOOT_NEXT)
+    assert sdk_mod.player_settings().loot_type == "guns"
+    assert "DROPS: GUNS  +25%" in statuses()
+    assert "PULL THE LEVER  ($6,600)" in statuses()
+    press("Left")
+    assert sdk_mod.player_settings().loot_type == "any"
+    saved = json.loads(settings_file.read_text())
+    assert saved["options"]["Your Machine"]["loot_type"] == "Anything", saved
+
     # Space pulls. Switching machine or bet mid-spin is ignored
     rng.queue = [Symbol.CASH] * 3
     cash_before = game.cash()
@@ -197,32 +222,44 @@ def play_in_the_world(
     assert game.cash() == cash_before - 5200 + 20 * 5200, game.cash()
     assert sdk_mod.overlay._root() is not None, "the HUD should have taken over the spin"
 
-    # ---- F8 opens the menu near any machine, pulls inside it, and E leaves ----
+    # ---- F8 opens the menu near any machine, and pulls inside it ----
     sdk_mod.open_menu_keybind.callback()
     tick(1 / 30)
     assert menu.is_open
     rng.queue = [Symbol.SKULL, Symbol.CASH, Symbol.EPIC]
     tick(0.3)
-    sdk_mod.open_menu_keybind.callback()
-    tick(1 / 30)
-    assert sdk_mod.controller.is_spinning
-    tick_until_idle()
-    assert "Pull the lever!" in statuses()
-    assert sdk_mod.use_machine_keybind.callback() is hooks.Block
-    tick(1 / 30)
-    assert not menu.is_open
-    commands.run("gamble_menu")
-    assert menu.is_open
-    commands.run("gamble_menu")
-    assert not menu.is_open
-
-    # Keybinds might not fire while the menu has focus, so it watches E and F8 itself too
-    commands.run("gamble_menu")
-    rng.queue = [Symbol.SKULL, Symbol.CASH, Symbol.EPIC]
+    # The SDK doesn't run keybinds while the cursor shows, so the menu watches F8 itself
     press("F8")
     assert sdk_mod.controller.is_spinning
     tick_until_idle()
+    assert "Pull the lever!" in statuses()
+    # Opened with F8, the player could be looking at a real vending machine, so E isn't taken over
     press("E")
+    assert menu.is_open
+    press("Escape")
+    assert not menu.is_open
+
+    # Opened with E at a slot machine, E leaves again
+    assert sdk_mod.use_machine_keybind.callback() is hooks.Block
+    tick(1 / 30)
+    assert menu.is_open
+    press("E")
+    assert not menu.is_open
+
+    # A win at a slot machine drops on the floor in front of it, from the chosen kind of loot
+    sdk_mod.loot_option.value = "Shotguns"
+    rng.queue = [Symbol.RARE] * 3
+    spawned_before = len(game.spawned)
+    commands.run("gamble_spin")
+    tick_until_idle()
+    drops = game.spawned[spawned_before:]
+    assert [pool for pool, _, _ in drops] == ["itempool_sg_03_rare"] * 2, drops
+    landed = sorted((round(x), round(y), round(z)) for _, _, (x, y, z) in drops)
+    assert landed == [(1090, 2360, 360), (1090, 2420, 360)], landed
+    sdk_mod.loot_option.value = "Anything"
+    commands.run("gamble_menu")
+    assert menu.is_open
+    commands.run("gamble_menu")
     assert not menu.is_open
 
     # A map change takes the menu's widgets - it closes, and hands control back
@@ -316,6 +353,19 @@ def play_in_the_world(
     pc.Pawn.location = (1000.0, 2000.0, 300.0)
 
 
+def panel_position(panel: Any) -> tuple[float, float]:
+    """Where a spectator panel was last put, in layout units."""
+    _, position = [call for call in panel.canvas.Slot.calls if call[0] == "SetPosition"][-1]
+    return position.X, position.Y
+
+
+def fake_game_width(sdk_mod: Any) -> float:
+    """How wide a spectator panel is on the fake game's screen, in layout units."""
+    from borderlands_gamble.overlay import SPECTATOR_W
+
+    return SPECTATOR_W * sdk_mod.spectators._scale
+
+
 def main(mods_base_dir: Path) -> None:
     tmp = Path(tempfile.mkdtemp(prefix="bl4_fake_game_"))
     sdk_mods = tmp / "sdk_mods"
@@ -346,7 +396,7 @@ def main(mods_base_dir: Path) -> None:
     mod = gamble.mod
 
     assert mod.name == "Borderlands Gamble", mod.name
-    assert mod.version == "0.3.0", mod.version
+    assert mod.version == "0.4.0", mod.version
     assert not mod.enabling_locked, "mod should be allowed to enable in BL4"
     assert ".sdkmod" in str(sdk_mod.__file__), f"should import from the .sdkmod, not {sdk_mod.__file__}"
 
@@ -365,6 +415,7 @@ def main(mods_base_dir: Path) -> None:
             or sdk_mod.casino.has_pending
             or sdk_mod._ping is not None
             or sdk_mod._trace_until is not None
+            or sdk_mod._trace_steps is not None
         )
 
     def tick(seconds: float = 1 / 15) -> None:
@@ -478,6 +529,11 @@ def main(mods_base_dir: Path) -> None:
         game.friend.sent.clear()
         return replies
 
+    # Every pull the host made so far was shown to Zane, so he could watch
+    shows = replies_to_friend()
+    assert shows and all(isinstance(m, protocol.Show) and m.player_id == 256 for m in shows), shows
+    assert shows[0].line == (Symbol.VAULT,) * 3 and shows[0].stake == 2600, shows[0]
+
     assert not from_friend("stat fps"), "other ServerExec traffic must pass through"
     assert from_friend(protocol.Ping(7))
     assert replies_to_friend() == [protocol.Pong(7)]
@@ -495,6 +551,27 @@ def main(mods_base_dir: Path) -> None:
     assert game.cash() == host_cash, "the host's own wallet is never touched"
     [(pool, level, (x, _, _))] = game.spawned[spawned_before:]
     assert pool.endswith("_05_legendary") and level == 20 and x > 1200, game.spawned[-1]
+
+    # The host watches Zane's spin: reels above his head while Moze looks his way...
+    [watched] = sdk_mod.spectator.views()
+    assert (watched.player_id, watched.name, watched.machine) == (257, "Zane", "LOOT SLOTS"), watched
+    game.pc.PlayerCameraManager.look_at(1300.0, 2000.0, 415.0)
+    tick(0.1)
+    assert "ZANE  -  LOOT SLOTS" in statuses(), statuses()[-6:]
+    panel = sdk_mod.spectators._panels[0]
+    assert panel.canvas.visibility == 3
+    px, py = panel_position(panel)
+    x_center = px + fake_game_width(sdk_mod) / 2
+    assert abs(x_center - 960) < 30 and py < 540, (px, py)
+    # ...and in the corner when he's behind him
+    game.pc.PlayerCameraManager.look_at(1000.0, 3000.0, 370.0)
+    tick(0.1)
+    assert panel_position(panel) == (24, 140), panel_position(panel)
+    tick(3.0)
+    assert "LEGENDARY!  +$430, 1 legendary" in statuses(), statuses()[-6:]
+    tick(5.0)
+    assert not sdk_mod.spectator.active and sdk_mod.spectators._root().visibility == 1
+    game.pc.PlayerCameraManager.view = (0.0, 90.0)
 
     game.friend.Pawn.location = (90_000.0, 0.0, 0.0)
     assert from_friend(protocol.Pull(2, "cash", 1))
@@ -542,6 +619,15 @@ def main(mods_base_dir: Path) -> None:
     assert (game.cash(), game.pc.CurrencyManager.row("eridium").Amount) == wallet, "the host pays, not us"
 
     assert not from_host("Welcome to Kairos!"), "other ClientMessages must pass through"
+
+    # The host says Zane pulled: we watch him too. We're never shown our own pulls
+    assert from_host(protocol.Show(257, "eridium", (Symbol.RARE,) * 3, 1, 15, "shotguns"))
+    assert from_host(protocol.Show(256, "cash", (Symbol.SKULL,) * 3, 1, 2600))
+    [watched] = sdk_mod.spectator.views()
+    assert (watched.player_id, watched.machine) == (257, "ERIDIUM SLOTS"), watched
+    tick(3.0)
+    assert "Rare loot!  2 rare shotguns" in statuses(), statuses()[-6:]
+    tick(5.0)
 
     commands.run("gamble_coop_test")
     ping = protocol.decode(game.pc.sent[-1][1])

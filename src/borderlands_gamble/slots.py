@@ -366,8 +366,16 @@ def format_amount(currency: Currency, amount: int) -> str:
     return f"{amount:,} eridium"
 
 
-def describe_loot(loot: Iterable[tuple[Tier, int]]) -> str:
-    parts = [f"{count} {tier.value}" for tier, count in loot if count > 0]
+def describe_loot(loot: Iterable[tuple[Tier, int]], noun: str | None = None) -> str:
+    """Describes items, e.g. "1 legendary, 2 epic", or with a noun, "1 legendary shotgun"."""
+    parts = []
+    for tier, count in loot:
+        if count <= 0:
+            continue
+        part = f"{count} {tier.value}"
+        if noun is not None:
+            part += f" {noun}" + ("" if count == 1 else "s")
+        parts.append(part)
     return ", ".join(parts)
 
 

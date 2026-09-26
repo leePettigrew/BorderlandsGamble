@@ -10,7 +10,9 @@ from borderlands_gamble.menu_model import (
     KeyWatcher,
     MenuAction,
     build_menu_info,
+    drops_label,
     next_bet,
+    next_loot_type,
     next_machine,
 )
 from borderlands_gamble.slots import SYMBOL_COLORS, Currency, Symbol
@@ -48,6 +50,16 @@ class KeyWatcherTests(unittest.TestCase):
     def test_menu_keys(self) -> None:
         self.assertEqual(MENU_KEYS["Escape"], MenuAction.LEAVE)
         self.assertEqual(MENU_KEYS["SpaceBar"], MenuAction.PULL)
+        # Keys the game would act on in a harmful way are never used
+        for key in (
+            "Enter",
+            "Gamepad_FaceButton_Left",
+            "Gamepad_LeftShoulder",
+            "Gamepad_RightShoulder",
+            "E",
+            "F",
+        ):
+            self.assertNotIn(key, MENU_KEYS)
         self.assertTrue(ACT_ON_RELEASE.issubset(MENU_KEYS))
         self.assertEqual(set(MENU_KEYS.values()), set(MenuAction))
 
@@ -69,6 +81,17 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual(next_bet(BET_MULTIPLIERS[-1], 1), BET_MULTIPLIERS[0])
         self.assertEqual(next_bet(BET_MULTIPLIERS[0], -1), BET_MULTIPLIERS[-1])
         self.assertEqual(next_bet(3, 1), BET_MULTIPLIERS[0])
+
+    def test_next_loot_type(self) -> None:
+        self.assertEqual(next_loot_type("any", 1), "guns")
+        self.assertEqual(next_loot_type("any", -1), "enhancements")
+        self.assertEqual(next_loot_type("enhancements", 1), "any")
+        self.assertEqual(next_loot_type("nope", 1), "any")
+
+    def test_drops_label(self) -> None:
+        self.assertEqual(drops_label("any"), "ANYTHING")
+        self.assertEqual(drops_label("shotguns"), "SHOTGUNS  +50%")
+        self.assertEqual(drops_label("class_mods"), "CLASS MODS  +100%")
 
     def test_next_machine(self) -> None:
         self.assertEqual(next_machine("cash"), "eridium")
@@ -99,6 +122,7 @@ class MenuInfoTests(unittest.TestCase):
         self.assertEqual(info.pull_label, "PULL THE LEVER  ($2,600)")
         self.assertEqual(info.bet_label, "BET  x1")
         self.assertEqual(info.machine_label, "PLAY ERIDIUM SLOTS")
+        self.assertEqual(info.drops_label, "DROPS: ANYTHING")
         self.assertEqual(info.wallet, "Cash $1,234,567     Eridium 230")
         self.assertEqual(info.lifetime, "No pulls yet. Good luck!")
         self.assertIn("F8", info.hints)
@@ -117,6 +141,11 @@ class MenuInfoTests(unittest.TestCase):
         self.assertEqual(skulls.pays, "nothing")
         self.assertEqual(info.paytable_title, "PAYTABLE  (x2 bet)")
         self.assertTrue(all(row.odds.startswith("1 in") or row.odds.endswith("%") for row in info.paytable))
+
+    def test_loot_type_names_the_loot(self) -> None:
+        info = self.info(loot_type_key="snipers", price=3900)
+        self.assertEqual(info.paytable[0].pays, "$195,000, 2 legendary sniper rifles")
+        self.assertEqual(info.drops_label, "DROPS: SNIPER RIFLES  +50%")
 
     def test_unknown_price(self) -> None:
         info = self.info(price=None, is_host=False)

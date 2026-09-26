@@ -4,9 +4,9 @@ Slot machines for Borderlands 4, as a [PythonSDK](https://github.com/bl-sdk/oak2
 
 Borderlands 4 shipped without the slot machines from earlier games. This mod adds them back. Walk into
 a safehouse and a slot machine stands at the end of the row of vending machines, with a **SLOTS** sign
-above it. Aim at it and press **E**, and the slot machine menu opens: pick a machine and a bet, check
-the paytable, and pull the lever. Wins pay out in cash or eridium, or in real loot that drops at your
-feet, straight from the game's own item pools.
+above it. Aim at it and press **E**, and the slot machine menu opens: pick a machine, what it drops,
+and a bet, check the paytable, and pull the lever. Wins pay out in cash or eridium, or in real loot
+that the machine drops on the floor in front of it, straight from the game's own item pools.
 
 > **Status: prototype, not yet run in the real game.** The slot machine engine is fully unit tested.
 > The game side is built only from APIs that other published BL4 SDK mods already use, or that every
@@ -26,15 +26,17 @@ Wondering how much of this is possible, and what's hard? See [docs/feasibility.m
   stats on one screen. Click the buttons, or use the keyboard or a controller.
 - **Two machines.** *Loot Slots* cost cash and get pricier as you level ($10 at level 1, $2.6k at 50,
   $25k at 70). *Eridium Slots* cost 10 eridium and roll rarer loot more often.
-- **Real loot.** Loot prizes drop at your level from the game's rarity pools: rare, epic, and
-  legendary guns, shields, grenades, repkits, class mods, and enhancements.
+- **Real loot, your pick.** Loot prizes drop at your level from the game's own item pools: rare, epic,
+  and legendary. Leave it on *Anything*, or pick what drops, from guns down to one weapon type, and
+  pay a bit more per pull (see [Drops](#drops)).
 - **Animated reels.** The reels spin and stop left to right, drawn with the game's own UI system, so
   no custom assets are needed. Pull again to skip the spin.
 - **Bets and luck.** Choose a 1x/2x/5x/10x bet and a luck preset from *Stingy* to *Moxxi Likes You*.
 - **Transparent odds.** Exact odds, not simulations: `gamble_odds` prints the full paytable.
 - **Lifetime stats.** Tracks spins, net winnings, jackpots, and items won.
-- **Co-op.** When both players have the mod, the host's game acts as the bank for everyone, and each
-  player gets their own machine and menu. See [docs/coop.md](docs/coop.md).
+- **Co-op.** When both players have the mod, you each gamble separately, with your own menu, bets, and
+  wallet, and the host's game handles the money and loot for everyone. You see your partner's reels
+  spinning above their head, then what they won. See [docs/coop.md](docs/coop.md).
 
 Why a look-alike rather than a real slot machine model, and why the mod shows its own "[E] Play"
 prompt instead of the game's? Both come down to what the game ships with. See
@@ -53,6 +55,23 @@ prompt instead of the game's? Both come down to what the game ships with. See
 
 The house always keeps an edge on currency; you gamble for the loot. All of this is tunable in
 [`machines.py`](src/borderlands_gamble/machines.py). Run `python tools/odds.py` to see what a change does.
+
+### Drops
+
+What a pull's loot is, if it wins any. Picking a kind makes every pull cost more. Currency prizes are
+multiples of what you paid, so they grow with the price. How often you win, and how many items, don't
+change.
+
+| Drops | Price | Notes |
+|---|---|---|
+| Anything | normal | Mostly guns, plus shields, grenades, repkits, class mods, and enhancements |
+| Guns | +25% | Any weapon type |
+| Shields, Grenades, Repkits | +25% | |
+| Pistols, SMGs, Assault Rifles, Shotguns, Sniper Rifles, Heavy Weapons | +50% | Just that weapon type |
+| Enhancements | +50% | |
+| Class Mods | +100% | |
+
+The prices and item pools are in [`loot.py`](src/borderlands_gamble/loot.py).
 
 ## Installing
 
@@ -80,10 +99,15 @@ In the menu:
 
 | Mouse | Keyboard | Controller | Does |
 |---|---|---|---|
-| **PULL THE LEVER** | Space, Enter, F8 | A | Pull. Pull again mid-spin to skip to the result. |
-| **BET** | Up / Down | Y, D-pad | Change the bet. |
-| **PLAY ... SLOTS** | Left / Right | X, D-pad | Switch machine. |
-| **LEAVE** | Esc, E | B | Close the menu. A spin still going carries on on your HUD. |
+| **PULL THE LEVER** | Space, F8 | A | Pull. Pull again mid-spin to skip to the result. |
+| **DROPS** | Left / Right | D-pad left / right | Pick what loot wins drop. |
+| **BET** | Up / Down | D-pad up / down | Change the bet. |
+| **PLAY ... SLOTS** | | Y | Switch machine. |
+| **LEAVE** | Esc, or E if E opened it | B | Close the menu. A spin still going carries on on your HUD. |
+
+The game still sees keys pressed in the menu, so the menu only uses ones that don't do anything
+harmful in game (no fire, grenade, action skill, or reload/use buttons). E only closes the menu if you
+opened it with E: then you're looking at the slot machine, which the game has nothing to use on.
 
 Console commands:
 
@@ -99,9 +123,10 @@ Console commands:
 | `gamble_trace [--seconds N]` | Research: records every game function call for a few seconds (see [docs/game-api.md](docs/game-api.md#research-the-games-own-use-prompt)). |
 
 Options (in the mods menu):
-- **Your Machine:** machine, bet, spin time, result time, menu scale, and the HUD reels' scale and
-  position.
-- **Slot Machines:** whether to put slot machines in safehouses, and whether they get a sign.
+- **Your Machine:** machine, drops, bet, spin time, result time, menu scale, and the HUD reels' scale
+  and position.
+- **Slot Machines:** whether to put slot machines in safehouses, whether they get a sign, and whether
+  to show your co-op partners' spins above their heads.
 - **House Rules:** luck, price multiplier, whether you have to be at a machine, free play, and loot
   level. In co-op, the host's house rules apply to everyone.
 
@@ -116,7 +141,7 @@ console snippets for investigating a failure. If charging breaks but everything 
   `gamble_machine remove`. It moves to the other end of the row.
 - **No slot machines appear:** `gamble_diag` reports how many are up. `gamble_machine refresh`
   rebuilds them, and prints why if one can't be built. F8 next to a vending machine still works.
-- **The menu won't close:** press Esc or E, click LEAVE, or run `gamble_menu` in the console.
+- **The menu won't close:** press Esc, click LEAVE, or run `gamble_menu` in the console.
 
 ## Development
 
@@ -124,7 +149,7 @@ console snippets for investigating a failure. If charging breaks but everything 
 src/borderlands_gamble/   the mod (this folder is what goes in the .sdkmod)
   slots.py      pure engine: symbols, reels, paytables, spins, exact odds
   machines.py   the two machines' reels, paytables and prices
-  loot.py       which item pools each prize tier drops from, and where drops land
+  loot.py       what each prize tier and Drops choice drops from, its price, and where drops land
   animation.py  reel animation timeline
   casino.py     Casino (the bank) and SlotController (a player's machine)
   protocol.py   co-op messages
@@ -132,9 +157,10 @@ src/borderlands_gamble/   the mod (this folder is what goes in the .sdkmod)
   stats.py      lifetime stats
   cabinets.py   where slot machines stand, and which one you're aiming at
   menu_model.py what the menu shows, and what its buttons and keys do
+  spectate.py   watching co-op partners' spins
   bl4.py        the game side: wallets, levels, loot drops, vending machines, co-op transport
   world.py      the game side of slot machines in the world: copying vending machines
-  overlay.py    the HUD reels and the "[E] Play" prompt, built from UMG widgets at runtime
+  overlay.py    the HUD reels, the "[E] Play" prompt, and partners' reels, built from UMG widgets
   menu.py       the slot machine menu, built from UMG widgets at runtime
   sdk_mod.py    options, keybinds, console commands, frame tick
 tests/          unit tests, plus a fake game for full solo and co-op sessions

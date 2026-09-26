@@ -71,6 +71,14 @@ class GameViewport(FakeObject):
 class World(FakeObject):
     Name = "World_Kairos"
 
+    def __init__(self) -> None:
+        self.GameState: GameState | None = None
+
+
+class GameState(FakeObject):
+    def __init__(self, players: list[PlayerState]) -> None:
+        self.PlayerArray = players
+
 
 def rotator(pitch: float, yaw: float, roll: float = 0.0) -> WrappedStruct:
     return WrappedStruct("Rotator", Pitch=pitch, Yaw=yaw, Roll=roll)
@@ -91,12 +99,24 @@ class CurrencyManager(FakeObject):
 
 
 class PlayerState(FakeObject):
-    def __init__(self, name: str, level: int) -> None:
+    def __init__(self, name: str, level: int, player_id: int, controller: PlayerController) -> None:
         self.name = name
         self.level = level
+        self.player_id = player_id
+        self.controller = controller
 
     def GetPlayerName(self) -> str:
         return self.name
+
+    def GetPlayerId(self) -> int:
+        return self.player_id
+
+    @property
+    def PawnPrivate(self) -> Pawn | None:
+        return self.controller.Pawn
+
+    def GetPlayerController(self) -> PlayerController:
+        return self.controller
 
     def BP_GetExperienceLevel(self, ptr: FGbxDefPtr) -> int:
         if ptr._name != "Character":
@@ -163,10 +183,11 @@ class PlayerController(FakeObject):
         location: tuple[float, float, float],
         *,
         local: bool,
+        player_id: int,
     ) -> None:
         self.Name = f"OakPlayerController_{name}"
-        self.Pawn = Pawn(location)
-        self.PlayerState = PlayerState(name, level)
+        self.Pawn: Pawn | None = Pawn(location)
+        self.PlayerState = PlayerState(name, level, player_id, self)
         self.CurrencyManager = CurrencyManager(balances)
         self.local = local
         self.authority = True
@@ -181,6 +202,21 @@ class PlayerController(FakeObject):
         # Input state, set by the test
         self.keys_down: set[str] = set()
         self.mouse: tuple[float, float] | None = None
+
+    def ProjectWorldLocationToScreen(self, location: Any, screen: Any, relative: bool) -> tuple[bool, Any]:
+        """A simple pinhole camera: 1 pixel per unit sideways at 1 m away, centred on a 2560x1440 screen."""
+        import math
+
+        eye = self.PlayerCameraManager.GetCameraLocation()
+        pitch, yaw = (math.radians(a) for a in self.PlayerCameraManager.view)
+        fx, fy, fz = math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch)
+        dx, dy, dz = location.X - eye.X, location.Y - eye.Y, location.Z - eye.Z
+        ahead = dx * fx + dy * fy + dz * fz
+        if ahead <= 1.0:
+            return False, WrappedStruct("Vector2D", X=0.0, Y=0.0)
+        right = -dx * math.sin(yaw) + dy * math.cos(yaw)
+        up = dz - ahead * fz
+        return True, WrappedStruct("Vector2D", X=1280.0 + right * 100 / ahead, Y=720.0 - up * 100 / ahead)
 
     def IsInputKeyDown(self, key: WrappedStruct) -> bool:
         if key._struct_name != "Key":
@@ -427,6 +463,7 @@ class SpawnedActor(FakeObject):
         self.transform = transform
         self.replicates = class_name == "SkeletalMeshActor"
         self.replicates_at_finish: bool | None = None
+        self.collision = True
         self.finished = False
         self.destroyed = False
         match class_name:
@@ -444,6 +481,9 @@ class SpawnedActor(FakeObject):
 
     def SetReplicates(self, value: bool) -> None:
         self.replicates = value
+
+    def SetActorEnableCollision(self, value: bool) -> None:
+        self.collision = value
 
     def K2_DestroyActor(self) -> None:
         self.destroyed = True
@@ -490,6 +530,21 @@ class KismetSystemLibrary(FakeObject):
         if not isinstance(command, str):
             raise TypeError("Expected a command")
         self.game.console_commands.append(command)
+
+    def LineTraceSingle(self, *args: Any) -> tuple[bool, WrappedStruct]:
+        """Checks the line against the game's walls: (x min, x max, y min, y max) boxes."""
+        if len(args) != 12:
+            raise TypeError(f"LineTraceSingle takes 12 arguments, got {len(args)}")
+        _, start, end, channel, _, ignore, *_ = args
+        if not isinstance(ignore, list) or channel != 0:
+            raise TypeError("Bad trace arguments")
+        self.game.traces += 1
+        for step in range(101):
+            t = step / 100
+            x, y = start.X + (end.X - start.X) * t, start.Y + (end.Y - start.Y) * t
+            if any(x0 <= x <= x1 and y0 <= y <= y1 for x0, x1, y0, y1 in self.game.walls):
+                return True, WrappedStruct("HitResult", Distance=t)
+        return False, WrappedStruct("HitResult", Distance=0.0)
 
 
 class WidgetBlueprintLibrary(FakeObject):
@@ -686,8 +741,16 @@ class Game:
         self.engine = Engine(self)
         balances = {"Cash": 1_000_000, "eridium": 500}
         # The local player, and a co-op partner who exists on the host as a remote controller
-        self.pc = PlayerController("Moze", 50, dict(balances), (1000.0, 2000.0, 300.0), local=True)
-        self.friend = PlayerController("Zane", 20, dict(balances), (1300.0, 2000.0, 300.0), local=False)
+        self.pc = PlayerController(
+            "Moze", 50, dict(balances), (1000.0, 2000.0, 300.0), local=True, player_id=256
+        )
+        self.friend = PlayerController(
+            "Zane", 20, dict(balances), (1300.0, 2000.0, 300.0), local=False, player_id=257
+        )
+        self.engine.GameViewport.World.GameState = GameState([self.pc.PlayerState, self.friend.PlayerState])
+        # Solid walls, for line traces: (x min, x max, y min, y max)
+        self.walls: list[tuple[float, float, float, float]] = []
+        self.traces = 0
         self.give_calls: list[tuple[str, str, int]] = []
         self.spawned: list[tuple[str, int, tuple[float, float, float]]] = []
         self.map_name = "Kairos_P"

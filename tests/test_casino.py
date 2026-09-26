@@ -159,6 +159,7 @@ class CasinoRefusalTests(CasinoTestCase):
         casino = self.make_casino()
         self.assert_refused(casino.pull(self.player, 1, "roulette", 1), "Unknown machine")
         self.assert_refused(casino.pull(self.player, 1, "cash", 3), "Unsupported bet")
+        self.assert_refused(casino.pull(self.player, 1, "cash", 1, "rocket_launchers"), "Unknown drop type")
 
 
 class CasinoPayoutTests(CasinoTestCase):
@@ -252,6 +253,45 @@ class CasinoPayoutTests(CasinoTestCase):
         self.assertEqual(payout.items, ())
         self.assertEqual(payout.cash, 5 * STAKE_50)
         self.assertTrue(payout.errors)
+
+    def test_loot_types_change_the_price_and_the_drops(self) -> None:
+        casino = self.make_casino([(S.RARE,) * 3, (S.LEGENDARY,) * 3, (S.EPIC,) * 3])
+        _, charged = casino.pull(self.player, 1, "cash", 1, "shotguns")
+        self.assertEqual(charged, 3900)
+        casino.settle_all()
+        _, charged = casino.pull(self.player, 2, "cash", 2, "class_mods")
+        self.assertEqual(charged, 2 * 5200)
+        casino.settle_all()
+        _, charged = casino.pull(self.player, 3, "eridium", 1, "guns")
+        self.assertEqual(charged, 13)
+        casino.settle_all()
+        pools = [pool for _, pool, *_ in self.backend.spawned]
+        self.assertEqual(
+            pools[:3],
+            ["itempool_sg_03_rare", "itempool_class_mods_05_legendary", "itempool_class_mods_05_legendary"],
+        )
+        self.assertTrue(
+            pools[3].endswith("_04_epic") and pools[3].split("_")[1] in {"ar", "ps", "sm", "sg", "sr", "hw"}
+        )
+
+    def test_every_spin_is_shared(self) -> None:
+        shared: list[tuple[Any, Any, str]] = []
+        casino = self.make_casino([(S.CASH,) * 3])
+        casino.on_spin = lambda player, result, loot_type: shared.append((player, result.line, loot_type))
+        casino.pull(self.player, 1, "cash", 1, "shields")
+        self.assertEqual(shared, [(self.player, (S.CASH,) * 3, "shields")])
+
+        # Refused pulls aren't, and a broken listener doesn't stop the pull
+        self.player.near_machine = False
+        casino.pull(self.player, 2, "cash", 1)
+        self.assertEqual(len(shared), 1)
+        self.player.near_machine = True
+
+        def explode(*_: Any) -> None:
+            raise RuntimeError("no network")
+
+        casino.on_spin = explode
+        self.assertIsInstance(casino.pull(self.player, 3, "cash", 1), tuple)
 
     def test_unreadable_level_prices_as_level_one(self) -> None:
         casino = self.make_casino([(S.SKULL, S.CASH, S.EPIC)])
@@ -397,6 +437,14 @@ class ControllerTests(ControllerTestCase):
         controller.pull()
         self.assertFalse(controller.is_spinning)
         self.assertEqual(len(self.backend.spawned), 1)
+
+    def test_loot_type_is_sent_and_named(self) -> None:
+        controller = self.make([(S.RARE,) * 3], loot_type="snipers")
+        controller.pull()
+        self.run_until_idle(controller)
+        self.assertEqual(self.backend.spawned[0][1], "itempool_sr_03_rare")
+        self.assertEqual(self.final_view().status, "Rare loot!  1 rare sniper rifle")
+        self.assertEqual(self.player.balances[Currency.CASH], 1_000_000 - 3900)
 
     def test_resting_view_and_last_result(self) -> None:
         controller = self.make([(S.EPIC, S.CASH, S.VAULT)])

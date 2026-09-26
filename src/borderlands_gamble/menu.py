@@ -55,7 +55,7 @@ REEL_W = 170.0
 REEL_H = 210.0
 REEL_SPACING = 190.0
 ROW_H = 70.0
-REELS_TOP = -225.0
+REELS_TOP = -235.0
 PAYTABLE_X = 10.0
 ODDS_X = 255.0
 PAYS_X = 620.0
@@ -63,13 +63,16 @@ PAYTABLE_TOP = -262.0
 PAYTABLE_ROW_H = 35.0
 PAYTABLE_ROWS = 14
 
-# (action, x, y, w, h, label scale), with x/y the top left corner
+# (action, x, y, w, h, label scale), with x/y the top left corner. PULL comes first, it gets focus.
 BUTTONS: tuple[tuple[MenuAction, float, float, float, float, float], ...] = (
-    (MenuAction.PULL, -620.0, 100.0, 570.0, 80.0, 1.05),
-    (MenuAction.BET_UP, -620.0, 196.0, 150.0, 60.0, 0.72),
-    (MenuAction.MACHINE, -458.0, 196.0, 250.0, 60.0, 0.72),
-    (MenuAction.LEAVE, -196.0, 196.0, 146.0, 60.0, 0.72),
+    (MenuAction.PULL, -620.0, 76.0, 570.0, 74.0, 1.05),
+    (MenuAction.MACHINE, -620.0, 162.0, 280.0, 54.0, 0.7),
+    (MenuAction.LOOT_NEXT, -330.0, 162.0, 280.0, 54.0, 0.7),
+    (MenuAction.BET_UP, -620.0, 226.0, 280.0, 54.0, 0.7),
+    (MenuAction.LEAVE, -330.0, 226.0, 280.0, 54.0, 0.7),
 )
+# Actions that can't change while a pull is in flight
+LOCKED_WHILE_BUSY = frozenset({MenuAction.MACHINE, MenuAction.LOOT_NEXT, MenuAction.BET_UP})
 
 WHITE: RGBA = (0.92, 0.92, 0.92, 1.0)
 GREY: RGBA = (0.62, 0.62, 0.62, 1.0)
@@ -217,19 +220,38 @@ class SlotMenu:
         if not self.is_open:
             return
         self._destroy_widgets()
-        # After a map change, the controller we changed may be gone - but the game's UI state may
-        # not be, so tidy up on the current one
-        pc = self._pc() or bl4.local_player()
+        pc = self._pc()
         if pc is not None:
             self._release_input(pc)
+        elif self._input.ui_state_pushed:
+            # After a map change (or quitting to the title screen) the controller we changed is gone.
+            # Leave the new one's input alone, but the game's UI state may have survived
+            current = bl4.local_player()
+            if current is not None:
+                bl4.run_console_command(current, f"gbx.ui.view.stateremove {UI_STATE}")
         self._input = _InputSnapshot()
         self._pc = WeakPointer()
         self._pawn_address = None
 
+    def check(self) -> bool:
+        """
+        Closes the menu if the game took it away (e.g. a map change), or the player respawned.
+
+        Returns:
+            True if the menu is (still) open.
+        """
+        if self._widgets is None:
+            return False
+        pc = self._pc()
+        if pc is None or self._root() is None or _address(pc.Pawn) != self._pawn_address:
+            self.close()
+            return False
+        return True
+
     def set_info(self, info: MenuInfo) -> None:
         """Updates everything around the reels."""
         widgets = self._widgets
-        if widgets is None or info == self._info:
+        if widgets is None or info == self._info or self._root() is None:
             return
         self._info = info
         cache = self._cache
@@ -249,19 +271,21 @@ class SlotMenu:
 
         labels = {
             MenuAction.PULL: info.pull_label,
-            MenuAction.BET_UP: info.bet_label,
             MenuAction.MACHINE: info.machine_label,
+            MenuAction.LOOT_NEXT: info.drops_label,
+            MenuAction.BET_UP: info.bet_label,
             MenuAction.LEAVE: "LEAVE",
         }
         for button in widgets.buttons:
-            button.enabled = not info.busy or button.action in (MenuAction.PULL, MenuAction.LEAVE)
+            button.enabled = not (info.busy and button.action in LOCKED_WHILE_BUSY)
             cache.text(button.label, labels[button.action])
             cache.color(button.label, WHITE if button.enabled else DISABLED_TEXT)
 
     # casino.Display
     def render(self, view: OverlayView) -> None:
         widgets = self._widgets
-        if widgets is None:
+        # Never touch widgets the game has cleaned up
+        if widgets is None or self._root() is None:
             return
         self._view = view
         cache = self._cache
@@ -278,14 +302,11 @@ class SlotMenu:
 
     def tick(self) -> None:
         """Handles clicks and key presses. Should be called every frame while open."""
+        if not self.check():
+            return
         widgets = self._widgets
         pc = self._pc()
-        if widgets is None:
-            return
-        if pc is None or self._root() is None or _address(pc.Pawn) != self._pawn_address:
-            # A map change took the widgets (or the player) with it, or the player respawned
-            self.close()
-            return
+        assert widgets is not None and pc is not None
 
         # The game sometimes takes the cursor back, e.g. when a HUD element updates
         pc.bShowMouseCursor = True
@@ -296,6 +317,9 @@ class SlotMenu:
             if not self.is_open:
                 break
             self.on_action(action)
+        if actions and self.is_open and widgets.buttons:
+            # Keep keyboard focus on PULL, so Space, Enter and A always pull
+            _try(widgets.buttons[0].hit, "SetKeyboardFocus")
 
     # ==============================================================================================
 
@@ -416,7 +440,7 @@ class SlotMenu:
         # Dim the game, and catch any clicks that miss the buttons so they don't reach the game
         big = max(screen.width, screen.height) / scale
         ui.box(-big, -big, 2 * big, 2 * big, BACKDROP, 0)
-        catcher = ui.construct("/Script/UMG.Button", VISIBLE)
+        catcher = ui.construct("/Script/UMG.Button", VISIBLE, _not_focusable)
         ui.place(catcher, -big, -big, 2 * big, 2 * big, 1)
         catcher.SetRenderOpacity(0.0)
 
@@ -444,13 +468,13 @@ class SlotMenu:
 
         widgets = _Widgets(
             root=root,
-            title=text(MACHINE_X, -half_h + 45, 1.45, GOLD),
-            tagline=text(MACHINE_X, -half_h + 88, 0.68, GREY),
+            title=text(MACHINE_X, -half_h + 40, 1.45, GOLD),
+            tagline=text(MACHINE_X, -half_h + 80, 0.68, GREY),
             reels=reels,
             payline=payline_band,
-            status=text(MACHINE_X, 25, 1.0, WHITE),
-            wallet=text(MACHINE_X, 68, 0.78, WHITE),
-            hints=text(MACHINE_X, half_h - 50, 0.58, GREY),
+            status=text(MACHINE_X, 3, 1.0, WHITE),
+            wallet=text(MACHINE_X, 42, 0.78, WHITE),
+            hints=text(MACHINE_X, half_h - 30, 0.56, GREY),
             paytable_title=text(PAYTABLE_X, -half_h + 45, 0.9, GOLD, "left"),
             rows=[
                 (
@@ -466,11 +490,11 @@ class SlotMenu:
         )
 
         for action, x, y, w, h, label_scale in BUTTONS:
-            fill, hover = (
-                (PULL_FILL, PULL_HOVER) if action is MenuAction.PULL else (BUTTON_FILL, BUTTON_HOVER)
-            )
+            pull = action is MenuAction.PULL
+            fill, hover = (PULL_FILL, PULL_HOVER) if pull else (BUTTON_FILL, BUTTON_HOVER)
             back = ui.box(x, y, w, h, fill, 20)
-            hit = ui.construct("/Script/UMG.Button", VISIBLE)
+            # Only PULL takes keyboard focus. Slate presses the focused button on Space, Enter or A
+            hit = ui.construct("/Script/UMG.Button", VISIBLE, None if pull else _not_focusable)
             ui.place(hit, x, y, w, h, 21)
             hit.SetRenderOpacity(BUTTON_OPACITY)
             label = ui.text(x + w / 2, y + h / 2, label_scale, 22)
@@ -478,6 +502,14 @@ class SlotMenu:
             rect = (left * screen.dpi, top * screen.dpi, w * scale * screen.dpi, h * scale * screen.dpi)
             widgets.buttons.append(_Button(action, hit, back, label, rect, fill, hover))
         return widgets
+
+
+def _not_focusable(button: UObject) -> None:
+    # Only read when the button's Slate widget gets built, i.e. before it's added to the canvas
+    try:
+        button.IsFocusable = False
+    except Exception as ex:  # noqa: BLE001
+        logging.dev_warning(f"[Borderlands Gamble] Couldn't make a button unfocusable: {ex!r}")
 
 
 def _widget_library() -> UObject | None:

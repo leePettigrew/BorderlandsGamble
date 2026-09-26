@@ -1,6 +1,6 @@
 [project]
 name = "borderlands_gamble"
-version = "0.3.0"
+version = "0.4.0"
 authors = [{ name = "leepettigrew" }]
 description = """\
 Adds slot machines to Borderlands 4. Walk up to any vending machine and pull the lever to gamble \
@@ -9,6 +9,6 @@ cash or eridium for more cash, eridium, and real loot from the game's own item p
 
 [tool.sdkmod]
 name = "Borderlands Gamble"
-version = "0.3.0"
+version = "0.4.0"
 supported_games = ["BL4"]
 coop_support = "RequiresAllPlayers"

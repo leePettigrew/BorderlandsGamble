@@ -33,6 +33,9 @@ GAP = 40.0
 SUPPRESS_RADIUS = 150.0
 # Candidate spots closer together than this count as the same spot.
 DUPLICATE_RADIUS = 100.0
+# How closely the line between the two furthest machines has to follow an end machine's sides for
+# them to count as a row (as a cosine). Machines facing each other across an aisle aren't a row.
+ROW_ALIGNMENT = 0.9
 # How far from the camera a slot machine can be used.
 REACH = 300.0
 # How far in front of the player `spot_in_front` puts a hand placed machine.
@@ -237,7 +240,14 @@ def candidate_spots(group: Sequence[VendingMachine]) -> list[tuple[VendingMachin
         )
         length = math.dist((a.x, a.y), (b.x, b.y)) or 1.0
         dx, dy = (b.x - a.x) / length, (b.y - a.y) / length
-        directions += [(b, dx, dy), (a, -dx, -dy)]
+        for machine, out_x, out_y in ((b, dx, dy), (a, -dx, -dy)):
+            # Only a real row if it runs out of this machine's side. Then use the side itself, so
+            # the slot machine lines up with the row
+            rx, ry = _right(machine.yaw)
+            along = out_x * rx + out_y * ry
+            if abs(along) >= ROW_ALIGNMENT:
+                side = 1.0 if along > 0 else -1.0
+                directions.append((machine, rx * side, ry * side))
         ends = [b, a]
     for machine in ends:
         rx, ry = _right(machine.yaw)
@@ -266,19 +276,22 @@ def plan_placements(
     machines: Sequence[VendingMachine],
     existing: Iterable[Spot],
     removed: Iterable[Spot],
+    occupied: Iterable[Spot] = (),
 ) -> list[list[Placement]]:
     """
     Plans the automatic slot machines still missing.
 
     Args:
         machines: The vending machines currently loaded.
-        existing: Where slot machines already stand.
+        existing: Where automatic slot machines already stand.
         removed: Spots where players removed an automatic slot machine.
+        occupied: Spots taken by anything else, e.g. machines placed by hand.
     Returns:
         For each group still missing a slot machine, its candidate placements, best first.
     """
     existing = list(existing)
     removed = list(removed)
+    occupied = list(occupied)
     plans: list[list[Placement]] = []
     for group in group_machines(machines):
         if any(spot.distance_to(m.x, m.y, m.bottom) <= SERVED_RADIUS for spot in existing for m in group):
@@ -286,7 +299,7 @@ def plan_placements(
         candidates = [
             Placement(spot, machine)
             for machine, spot in candidate_spots(group)
-            if not _near(removed, spot, SUPPRESS_RADIUS)
+            if not _near(removed, spot, SUPPRESS_RADIUS) and not _near(occupied, spot, DUPLICATE_RADIUS)
         ]
         if candidates:
             plans.append(candidates)
@@ -339,13 +352,13 @@ def ray_hit(origin: Vector, direction: Vector, body: Body) -> float | None:
     return enter if enter <= leave else None
 
 
-def aimed_at(
+def aim(
     origin: Vector,
     direction: Vector,
     targets: Iterable[tuple[T, Body]],
     blockers: Iterable[Body] = (),
     reach: float = REACH,
-) -> T | None:
+) -> tuple[T, float] | None:
     """
     Works out which target the player is aiming at.
 
@@ -356,7 +369,8 @@ def aimed_at(
         blockers: Other bodies in the way, e.g. real vending machines next to a slot machine.
         reach: The furthest away a target can be.
     Returns:
-        The nearest target the view hits within reach, unless a blocker is hit first.
+        The nearest target the view hits within reach, and how far away it is, unless a blocker is
+        hit first.
     """
     best: tuple[T, float] | None = None
     for target, body in targets:
@@ -367,7 +381,19 @@ def aimed_at(
         return None
     if any((hit := ray_hit(origin, direction, body)) is not None and hit < best[1] for body in blockers):
         return None
-    return best[0]
+    return best
+
+
+def aimed_at(
+    origin: Vector,
+    direction: Vector,
+    targets: Iterable[tuple[T, Body]],
+    blockers: Iterable[Body] = (),
+    reach: float = REACH,
+) -> T | None:
+    """Like `aim`, but only returns the target."""
+    found = aim(origin, direction, targets, blockers, reach)
+    return None if found is None else found[0]
 
 
 # ==================================================================================================
@@ -407,12 +433,6 @@ class MachineOverrides:
         """Adds a hand placed machine. Returns the spot as it will be saved."""
         spot = Spot.from_json(spot.to_json()) or spot
         self.added.setdefault(map_name, []).append(spot)
-        # Adding a machine where an automatic one was removed undoes the removal
-        self._set(
-            self.removed,
-            map_name,
-            [r for r in self.removed.get(map_name, []) if not _near([r], spot, SUPPRESS_RADIUS)],
-        )
         return spot
 
     def remove(self, map_name: str, spot: Spot, *, automatic: bool) -> None:
@@ -485,7 +505,7 @@ class CabinetKeeper(Generic[T]):
         self.cabinets: list[Cabinet[T]] = []
         self._failed: list[Spot] = []
 
-    def update(self, map_name: str, machines: Sequence[VendingMachine], overrides: MachineOverrides) -> None:
+    def update(self, map_name: str, machines: Sequence[VendingMachine], overrides: MachineOverrides) -> bool:
         """
         Puts up missing machines and takes down unwanted ones.
 
@@ -493,22 +513,29 @@ class CabinetKeeper(Generic[T]):
             map_name: The current map. Changing it forgets every machine from the last one.
             machines: The vending machines currently loaded.
             overrides: The players' changes, for every map.
+        Returns:
+            True if there may be more to put up, e.g. it stopped to spread the work out.
         """
         if map_name != self.map_name:
             # The old map's actors went with it
             self.cabinets.clear()
             self._failed.clear()
             self.map_name = map_name
-        self.cabinets = [cabinet for cabinet in self.cabinets if self.is_alive(cabinet.handle)]
+        for cabinet in [c for c in self.cabinets if not self.is_alive(c.handle)]:
+            # Something took some of it away. Clear up whatever's left before putting it back
+            self._take_down(cabinet)
 
         added = overrides.added.get(map_name, [])
         removed = overrides.removed.get(map_name, [])
         for cabinet in list(self.cabinets):
             spot = cabinet.spot
             if cabinet.automatic:
-                # Also make way if a vending machine loaded in where we guessed the row ended
-                unwanted = _near(removed, spot, SUPPRESS_RADIUS) or any(
-                    _overlaps(spot, cabinet.source.half_width, m) for m in machines
+                # Also make way if a vending machine loaded in where we guessed the row ended, or a
+                # player put one there by hand
+                unwanted = (
+                    _near(removed, spot, SUPPRESS_RADIUS)
+                    or _near(added, spot, DUPLICATE_RADIUS)
+                    or any(_overlaps(spot, cabinet.source.half_width, m) for m in machines)
                 )
             else:
                 unwanted = spot not in added
@@ -517,8 +544,10 @@ class CabinetKeeper(Generic[T]):
 
         budget = MAX_SPAWNS_PER_UPDATE
         for spot in added:
-            if budget <= 0 or len(self.cabinets) >= MAX_CABINETS:
-                return
+            if len(self.cabinets) >= MAX_CABINETS:
+                return False
+            if budget <= 0:
+                return True
             if spot in self._failed or any(c.spot == spot and not c.automatic for c in self.cabinets):
                 continue
             source = min(machines, key=lambda m: math.dist((m.x, m.y), (spot.x, spot.y)), default=None)
@@ -528,14 +557,20 @@ class CabinetKeeper(Generic[T]):
             budget -= 1
             self._put_up(source, spot, automatic=False)
 
-        for candidates in plan_placements(machines, (c.spot for c in self.cabinets), removed):
-            if budget <= 0 or len(self.cabinets) >= MAX_CABINETS:
-                return
+        # Hand placed machines are extras: they don't stand in for a row's own slot machine
+        automatic = [c.spot for c in self.cabinets if c.automatic]
+        occupied = [c.spot for c in self.cabinets if not c.automatic]
+        for candidates in plan_placements(machines, automatic, removed, occupied):
+            if len(self.cabinets) >= MAX_CABINETS:
+                return False
+            if budget <= 0:
+                return True
             placement = next((p for p in candidates if p.spot not in self._failed), None)
             if placement is None:
                 continue
             budget -= 1
             self._put_up(placement.source, placement.spot, automatic=True)
+        return False
 
     def clear(self) -> None:
         """Takes down every machine, and forgets any spots that failed."""

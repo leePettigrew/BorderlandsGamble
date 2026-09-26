@@ -91,7 +91,8 @@ That covers everything a slot machine needs. [game-api.md](game-api.md) has the 
    loot payouts from the game's pools, bets, luck presets, lifetime stats, exact odds, diagnostics,
    and co-op with the host as the bank.
 2. **Machines in the world (this version).** Look-alike slot machines at every row of vending
-   machines, the mod's own "[E] Play" prompt, and a clickable menu. The first in-game test is next.
+   machines, the mod's own "[E] Play" prompt, a clickable menu, picking what loot drops, and co-op
+   partners seeing each other's spins. The first in-game test is next.
 3. **The game's own prompt.** With the event names from `gamble_trace`, make the slot machines real
    interactive objects, and reuse existing game sounds.
 4. **More games.** Double-or-nothing on items, roulette, blackjack against Moxxi, and daily jackpot
