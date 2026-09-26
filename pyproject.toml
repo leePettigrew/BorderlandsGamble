@@ -1,0 +1,20 @@
+# Dev tooling for the repo. The mod's own metadata lives in src/borderlands_gamble/pyproject.toml.
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "UP", "BLE", "C4", "PIE", "RET", "SIM", "PTH", "RUF", "TC",
+]
+ignore = [
+    "RUF001",  # Ambiguous unicode in strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PTH"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
