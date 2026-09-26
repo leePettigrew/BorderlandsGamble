@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14 is what the BL4 SDK runs; 3.11 keeps the pure engine easy to work on locally
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check .
+          ruff format --check .
+
+      - name: Fetch mods_base for the fake game sessions
+        run: git clone --depth 1 https://github.com/bl-sdk/mods_base "$RUNNER_TEMP/mods_base"
+
+      - name: Test
+        env:
+          # The solo and co-op sessions run through the real mods_base, which needs Python 3.14
+          MODS_BASE_DIR: ${{ runner.temp }}/mods_base
+        run: python -m unittest -v
+
+      - name: Build the .sdkmod
+        run: python tools/build_sdkmod.py
+
+      - name: Upload the .sdkmod
+        if: matrix.python-version == '3.14'
+        uses: actions/upload-artifact@v4
+        with:
+          name: borderlands_gamble
+          path: dist/borderlands_gamble.sdkmod
