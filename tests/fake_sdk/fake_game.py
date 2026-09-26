@@ -239,9 +239,17 @@ class PlayerController(FakeObject):
         return self.local
 
     def ServerExec(self, msg: str) -> None:
+        # A console command, which calls ServerExecRPC in dev builds. Shipping builds skip it, so
+        # nothing gets sent
         if not isinstance(msg, str):
             raise TypeError("ServerExec takes a string")
-        self.sent.append(("ServerExec", msg))
+
+    def ServerExecRPC(self, msg: str) -> None:
+        if not isinstance(msg, str):
+            raise TypeError("ServerExecRPC takes a string")
+        if len(msg) > 128:
+            raise ConnectionError("The host kicks clients that send ServerExecRPC over 128 characters")
+        self.sent.append(("ServerExecRPC", msg))
 
     def ClientMessage(self, s: str, msg_type: str, lifetime: float) -> None:
         if not isinstance(s, str) or not isinstance(msg_type, str):
@@ -793,6 +801,7 @@ class Game:
         if cls == "Function" and name in (
             "/Script/Engine.CameraModifier:BlueprintModifyCamera",
             "/Script/Engine.PlayerController:ServerExec",
+            "/Script/Engine.PlayerController:ServerExecRPC",
             "/Script/Engine.PlayerController:ClientMessage",
         ):
             return FakeObject()

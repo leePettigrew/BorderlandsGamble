@@ -184,14 +184,20 @@ If the menu ever gets stuck open, `gamble_menu` in the console closes it and giv
 
 | What | API | Proven by |
 |---|---|---|
-| Client → host message | `pc.ServerExec(text)`: a reliable server RPC on every Unreal `PlayerController`. Its normal job is a dev console, which shipping builds skip | Part of Unreal Engine. BL4 mods call it too (world travel, MSBT `travel.py`) |
+| Client → host message | `pc.ServerExecRPC(text)`: a reliable server RPC on every Unreal `PlayerController`, up to 128 characters (the host kicks a client that sends more) | Part of Unreal Engine |
 | Host → client message | `pc.ClientMessage(text, "None", 0.0)`: a reliable client RPC on every `PlayerController` | Part of Unreal Engine |
-| Receiving | Pre-hooks on `/Script/Engine.PlayerController:ServerExec` and `:ClientMessage`. unrealsdk hooks `ProcessEvent`, which is how incoming RPCs get dispatched. Our messages start with `BLGMB\|` and are blocked after handling; anything else passes through untouched | unrealsdk's BL4 `ProcessEvent` hook |
+| Receiving | Pre-hooks on `/Script/Engine.PlayerController:ServerExecRPC` and `:ClientMessage`. unrealsdk hooks `ProcessEvent`, which is how incoming RPCs get dispatched. Our messages start with `BLGMB\|` and are blocked after handling; anything else passes through untouched | unrealsdk's BL4 `ProcessEvent` hook |
 | Acting for a partner | On the host, the hook's `obj` is the sending player's controller, and wallet, level, and loot calls take it directly | MSBT's host-side `givecurrency` for other players |
 
+Not `ServerExec`. Up to 0.4.2 the mod sent with it, and in the first real co-op test the client's
+pulls never reached the host. In Unreal Engine 5, `ServerExec` isn't the network call any more: it's
+a console command that calls `ServerExecRPC`, and shipping builds compile its body out. Both show up
+in a `dir()` of BL4's player controller. The fake game's `ServerExec` now does nothing, like the real
+one, so the tests catch this.
+
 Outgoing calls are wrapped in `unrealsdk.hooks.prevent_hooking_direct_calls()`, so our own hooks
-don't see them. `gamble_coop_test` checks the whole round trip in a real session. See
-[coop.md](coop.md).
+don't see them. `gamble_coop_test` checks the whole round trip in a real session, and the host's
+console logs each test it answers. See [coop.md](coop.md).
 
 ## Watching other players
 

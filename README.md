@@ -8,11 +8,11 @@ above it. Aim at it and press **E**, and the slot machine menu opens: pick a mac
 and a bet, check the paytable, and pull the lever. Wins pay out in cash or eridium, or in real loot
 that the machine drops on the floor in front of it, straight from the game's own item pools.
 
-> **Status: early, and tested in the real game once.** In that first test, the slot machine stood in
-> the Launchpad, E opened the menu, and Free Play spins worked. Paid pulls and loot prizes failed.
-> 0.4.2 should fix both, but hasn't been tried in game yet, and neither has co-op. The slot
-> machine engine is fully unit tested, and full solo and co-op sessions run against a simulated game.
-> If anything is off, run `gamble_diag` (see [Troubleshooting](#troubleshooting)).
+> **Status: early.** In the first real tests, the slot machine stood in the Launchpad, E opened the
+> menu, and Free Play spins worked. Paid pulls, loot prizes, and a co-op partner's pulls failed.
+> 0.4.3 should fix all three, but hasn't been tried in game yet. The slot machine engine is fully
+> unit tested, and full solo and co-op sessions run against a simulated game. If anything is off,
+> run `gamble_diag` (see [Troubleshooting](#troubleshooting)).
 
 Wondering how much of this is possible, and what's hard? See [docs/feasibility.md](docs/feasibility.md).
 

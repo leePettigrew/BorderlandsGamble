@@ -36,10 +36,11 @@ CURRENCY_LIBRARY_CLASS = "GbxCurrencyFunctionLibrary"
 ITEM_POOL_STORE_CLASS = "NexusConfigStoreItemPool"
 VENDING_MACHINE_CLASS = "OakVendingMachine"
 
-# Co-op messages ride on two network calls every Unreal player controller has. ServerExec sends a
-# string from a client to the host (its normal job is a dev console, which shipping builds ignore),
-# and ClientMessage sends a string from the host to one client.
-SERVER_RPC = "/Script/Engine.PlayerController:ServerExec"
+# Co-op messages ride on two network calls every Unreal player controller has. ServerExecRPC sends a
+# string from a client to the host, and ClientMessage sends one from the host to a client. Not
+# ServerExec: in Unreal Engine 5 that's a console command which calls ServerExecRPC, and shipping
+# builds like BL4's compile it down to nothing, so messages sent with it never leave the client.
+SERVER_RPC = "/Script/Engine.PlayerController:ServerExecRPC"
 CLIENT_RPC = "/Script/Engine.PlayerController:ClientMessage"
 COOP_HOOK_ID = "borderlands_gamble.coop"
 
@@ -560,7 +561,7 @@ class CoopChannel:
     Sends co-op messages between players, and hands incoming ones to the mod.
 
     Outgoing calls skip our own hooks. Incoming calls are recognised by our message prefix, handled,
-    and blocked, so the game never runs its normal ServerExec/ClientMessage logic on them.
+    and blocked, so the game never runs its normal ServerExecRPC/ClientMessage logic on them.
     """
 
     def __init__(
@@ -583,8 +584,11 @@ class CoopChannel:
         pc = local_player()
         if pc is None:
             raise RuntimeError("No player controller to send from")
+        if len(text) > protocol.MAX_LENGTH:
+            # The host would kick us for it
+            raise ValueError(f"Message too long for the host: {text}")
         with prevent_hooking_direct_calls():
-            pc.ServerExec(text)
+            pc.ServerExecRPC(text)
 
     def send_to_client(self, player: UObject, text: str) -> None:
         with prevent_hooking_direct_calls():

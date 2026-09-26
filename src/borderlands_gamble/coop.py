@@ -68,6 +68,7 @@ def handle_host_message(
         case protocol.Settle():
             casino.settle(casino.backend.player_key(player), message.request_id)
         case protocol.Ping():
+            log(f"{casino.backend.player_name(player)} ran the co-op test. Answering.")
             reply(protocol.encode(protocol.Pong(message.nonce)))
         case _:
             log(f"Ignoring a host-bound {type(message).__name__} from {casino.backend.player_name(player)}")

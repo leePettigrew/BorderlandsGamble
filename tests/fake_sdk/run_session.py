@@ -25,7 +25,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 TICK_FUNC = "/Script/Engine.CameraModifier:BlueprintModifyCamera"
-SERVER_RPC = "/Script/Engine.PlayerController:ServerExec"
+SERVER_RPC = "/Script/Engine.PlayerController:ServerExecRPC"
 CLIENT_RPC = "/Script/Engine.PlayerController:ClientMessage"
 
 
@@ -396,7 +396,7 @@ def main(mods_base_dir: Path) -> None:
     mod = gamble.mod
 
     assert mod.name == "Borderlands Gamble", mod.name
-    assert mod.version == "0.4.2", mod.version
+    assert mod.version == "0.4.3", mod.version
     assert not mod.enabling_locked, "mod should be allowed to enable in BL4"
     assert ".sdkmod" in str(sdk_mod.__file__), f"should import from the .sdkmod, not {sdk_mod.__file__}"
 
@@ -541,10 +541,10 @@ def main(mods_base_dir: Path) -> None:
     tick_until_idle()
     game.pc.Pawn.location = (1000.0, 2000.0, 300.0)
 
-    # ---- Co-op, as the host: our partner Zane's pulls arrive as ServerExec calls ----
+    # ---- Co-op, as the host: our partner Zane's pulls arrive as ServerExecRPC calls ----
     def from_friend(message: protocol.Message | str) -> bool:
         text = message if isinstance(message, str) else protocol.encode(message)
-        return hooks.fire(SERVER_RPC, hooks.Type.PRE, game.friend, WrappedStruct("ServerExec", Msg=text))
+        return hooks.fire(SERVER_RPC, hooks.Type.PRE, game.friend, WrappedStruct("ServerExecRPC", Msg=text))
 
     def replies_to_friend() -> list[protocol.Message | None]:
         replies = [protocol.decode(text) for func, text in game.friend.sent if func == "ClientMessage"]
@@ -556,7 +556,7 @@ def main(mods_base_dir: Path) -> None:
     assert shows and all(isinstance(m, protocol.Show) and m.player_id == 256 for m in shows), shows
     assert shows[0].line == (Symbol.VAULT,) * 3 and shows[0].stake == 50_000, shows[0]
 
-    assert not from_friend("stat fps"), "other ServerExec traffic must pass through"
+    assert not from_friend("stat fps"), "other ServerExecRPC traffic must pass through"
     assert from_friend(protocol.Ping(7))
     assert replies_to_friend() == [protocol.Pong(7)]
 
@@ -613,7 +613,7 @@ def main(mods_base_dir: Path) -> None:
     tick_until_idle()
     assert game.friend.cash() == friend_cash - 20_000 + 20 * 20_000, game.friend.cash()
 
-    # ---- Co-op, as a client: our pulls go to the host over ServerExec ----
+    # ---- Co-op, as a client: our pulls go to the host over ServerExecRPC ----
     game.pc.authority = False
     game.pc.sent.clear()
     wallet = (game.cash(), game.pc.CurrencyManager.row("eridium").Amount)
@@ -627,7 +627,7 @@ def main(mods_base_dir: Path) -> None:
     commands.run("gamble_spin")
     [(func, text)] = game.pc.sent
     pull = protocol.decode(text)
-    assert func == "ServerExec" and isinstance(pull, protocol.Pull), (func, text)
+    assert func == "ServerExecRPC" and isinstance(pull, protocol.Pull), (func, text)
     assert (pull.machine_key, pull.bet) == ("eridium", 2), pull
     assert sdk_mod.controller.is_waiting
     assert any("Pulling the lever" in text for text in statuses())
@@ -635,7 +635,7 @@ def main(mods_base_dir: Path) -> None:
     assert from_host(protocol.Result(pull.request_id, "eridium", (Symbol.VAULT,) * 3, 2, 20, 20))
     assert sdk_mod.controller.is_spinning
     tick_until_idle()
-    assert game.pc.sent[-1] == ("ServerExec", protocol.encode(protocol.Settle(pull.request_id)))
+    assert game.pc.sent[-1] == ("ServerExecRPC", protocol.encode(protocol.Settle(pull.request_id)))
     assert sdk_mod.stats.jackpots == jackpots_before + 1
     assert any("JACKPOT!" in text and "6 legendary" in text for text in statuses()), statuses()
     assert (game.cash(), game.pc.CurrencyManager.row("eridium").Amount) == wallet, "the host pays, not us"

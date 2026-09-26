@@ -21,12 +21,12 @@ from .loot import DEFAULT_LOOT_TYPE
 from .machines import BET_MULTIPLIERS, MACHINES
 from .slots import Line, SpinResult, Symbol, scale_prize
 
-MOD_VERSION = "0.4.2"
+MOD_VERSION = "0.4.3"
 
 PREFIX = "BLGMB"
 PROTOCOL = 1
 SEPARATOR = "|"
-# Unreal limits some string RPCs to 128 characters, so leave plenty of headroom
+# The host kicks a client whose ServerExecRPC message is over 128 characters, so leave some headroom
 MAX_LENGTH = 120
 
 SYMBOL_CODES: dict[Symbol, str] = {
